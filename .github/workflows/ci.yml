@@ -11,7 +11,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with: { components: "clippy, rustfmt" }
-      - run: sudo apt-get update && sudo apt-get install -y libpam0g-dev libssl-dev pkg-config
+      - run: sudo apt-get update && sudo apt-get install -y libpam0g-dev libssl-dev pkg-config tzdata
       - name: Build the UI (embedded in the service)
         run: cd service/web && npm ci && npm run build
       - run: cargo fmt --all --check

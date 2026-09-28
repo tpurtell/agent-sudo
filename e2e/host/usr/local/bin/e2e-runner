@@ -112,7 +112,7 @@ class H(BaseHTTPRequestHandler):
     def post(self):
         u = urlparse(self.path); b = self.body()
         if u.path == "/enroll":
-            r = subprocess.run(["/usr/local/sbin/agent-sudo-hostd", "enroll", "--service", SERVICE, "--token", b["token"], "--ca-file", CA, "--name", b.get("name", "e2e-host"), "--force"], capture_output=True, text=True)
+            r = subprocess.run(["/usr/local/sbin/agent-sudo-hostd", "enroll", "--service", SERVICE, "--token=" + b["token"], "--ca-file", CA, "--name", b.get("name", "e2e-host"), "--force"], capture_output=True, text=True)
             if r.returncode != 0: return self.reply(500, {"error": r.stderr + r.stdout})
             return self.reply(200, {"ok": start_hostd(), "output": r.stdout})
         if u.path == "/hostd":

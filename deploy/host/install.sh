@@ -58,7 +58,7 @@ if [ "${1:-}" = "--enroll" ]; then
     url=${2:?service URL}
     token=${3:?enrollment token}
     shift 3
-    "$sbin" enroll --service "$url" --token "$token" "$@"
+    "$sbin" enroll --service="$url" --token="$token" "$@"
     systemctl enable --now agent-sudo-hostd
     sleep 1
     "$sbin" status

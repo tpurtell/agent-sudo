@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Enrolling failed when the one-time token happened to start with `-` (about one
+  in 64): the installer passed it so it read as an option. The installer now passes
+  `--token=…`, and new tokens never start with `-`.
 - Creating, widening or resuming a delegation or grant now re-checks the requests
   already waiting, so remembering one of a batch (the same command on six hosts)
   releases the rest instead of leaving each for a human. Their notifications are

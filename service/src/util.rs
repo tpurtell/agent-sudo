@@ -27,9 +27,15 @@ pub fn random_bytes<const N: usize>() -> [u8; N] {
     buf
 }
 
-/// 256-bit URL-safe token.
+/// 256-bit URL-safe token. Never starts with `-`, so pasted onto a command line it
+/// can't be read as an option.
 pub fn new_token() -> String {
-    URL_SAFE_NO_PAD.encode(random_bytes::<32>())
+    loop {
+        let t = URL_SAFE_NO_PAD.encode(random_bytes::<32>());
+        if !t.starts_with('-') {
+            return t;
+        }
+    }
 }
 
 pub fn sha256_hex(data: impl AsRef<[u8]>) -> String {
@@ -81,6 +87,7 @@ mod tests {
         assert!(new_id("req").starts_with("req_"));
         assert_eq!(short_code().len(), 4);
         assert_eq!(new_token().len(), 43);
+        assert!((0..2000).all(|_| !new_token().starts_with('-')));
         assert!(ct_eq(b"abc", b"abc"));
         assert!(!ct_eq(b"abc", b"abd"));
         assert!(!ct_eq(b"abc", b"ab"));

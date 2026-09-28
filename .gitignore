@@ -1,0 +1,13 @@
+# Operator-specific infrastructure (hostnames, deploy scripts, keys) never ships.
+private/
+
+# Build output
+target/
+node_modules/
+dist/
+
+# Local secrets
+*.key
+.env
+.env.*
+!.env.example

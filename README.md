@@ -10,7 +10,7 @@ still just type the password.
 <p align="center">
   <img src="docs/images/phone-requests.png" width="260" alt="Pending requests on a phone">
   <img src="docs/images/phone-root-shell.png" width="260" alt="A root shell request that needs a passkey">
-  <img src="docs/images/phone-authority.png" width="260" alt="Delegations and standing grants">
+  <img src="docs/images/phone-remember.png" width="260" alt="The model suggests delegating this kind of work">
 </p>
 
 - **Drop-in.** A feature-gated fork of [sudo-rs](https://github.com/trifectatechfoundation/sudo-rs),

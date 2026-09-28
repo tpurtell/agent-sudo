@@ -1759,14 +1759,9 @@ pub async fn notify_pending(state: &Shared, row: &RequestRow) {
         "url": format!("/r/{}", row.id),
     });
     let ttl = ((row.deadline_at - now_ms()) / 1000).clamp(30, 3600) as u32;
-    let topic = row
-        .id
-        .replace('_', "")
-        .chars()
-        .rev()
-        .take(30)
-        .collect::<String>();
-    push::fan_out(&state.push, &state.db, subs, &payload, ttl, Some(&topic)).await;
+    // No Topic header: Apple's push service rejects values other services accept
+    // (BadWebPushTopic), and notifications already collapse by tag on the device.
+    push::fan_out(&state.push, &state.db, subs, &payload, ttl, None).await;
 }
 
 async fn notify_automated(state: &Shared, row: &RequestRow, delegation: &GrantRow) {

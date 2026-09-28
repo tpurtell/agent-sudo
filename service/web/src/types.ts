@@ -6,12 +6,23 @@ export interface Feature {
   level: "info" | "warn" | "danger";
 }
 
+export type Remember = "once" | "exact" | "prefix" | "program" | "any";
+
 export interface Suggestion {
   decision: "approve" | "deny" | "ask";
+  /** The same draft as a plain grant. */
   command: "once" | "exact" | "prefix" | "executable";
   hosts: "host" | "group" | "all";
   requester: "session" | "user";
   ttl_minutes: number;
+  remember?: Remember;
+  prefix_len?: number;
+  kind_of_work?: string;
+  /** `{program}: {kind of work}`, drafted by the model or the policy template. */
+  intent?: string;
+  intent_source?: "approver" | "model" | "template";
+  /** 0 means no expiry. */
+  duration_minutes?: number;
   probabilities?: Record<string, Record<string, number>>;
 }
 
@@ -21,6 +32,7 @@ export interface Assessment {
   confidence: number;
   dimensions: Record<string, number>;
   relevance: number | null;
+  relevance_by?: Record<string, number>;
   suggestion: Suggestion;
   summary: string;
   reasons: string[];
@@ -32,10 +44,19 @@ export interface Assessment {
   created_at: number;
 }
 
+export interface DelegationCheck {
+  id: string;
+  label: string;
+  approved: boolean;
+  reasons: string[];
+  relevance?: number | null;
+}
+
 export interface StoredAssessment {
   assessment: Assessment | null;
   failure: { error: string; model: string; at: number } | null;
-  delegation_check: { id: string; label: string; approved: boolean; reasons: string[] } | null;
+  delegation_check: DelegationCheck | null;
+  delegation_checks?: DelegationCheck[];
   running: boolean;
 }
 
@@ -77,7 +98,7 @@ export interface RequestView {
   created_at: number;
   updated_at: number;
   deadline_at: number;
-  host: { id: string; name: string; groups: string[] } | null;
+  host: { id: string; name: string; groups: string[]; default_group?: string | null } | null;
   user: string;
   target: string;
   target_uid: number;
@@ -111,6 +132,8 @@ export interface RequestView {
   grant_id: string | null;
   delegation_id: string | null;
   flagged_at: number | null;
+  /** An existing delegation the approver can widen to cover this request. */
+  widen?: { id: string; label: string; intent: string; covers: string; summary: string; paused: boolean; expires_at: number | null; max_risk: number } | null;
   related?: { id: string; host: string; state: string; via: string | null; by: string | null; created_at: number; same_session: boolean }[];
 }
 

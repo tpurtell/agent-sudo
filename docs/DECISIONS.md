@@ -118,3 +118,35 @@ An independent review of the first build found these; all are fixed and tested
   silently widen their requester scope, a missing model dimension fails its ceiling,
   push endpoints must be known push services, and hostd's unit no longer hides `/home`
   and `/tmp` (it needs them to judge executables and paths).
+
+## 2026-09-28 Delegation you can almost always say yes to (0.2.0)
+
+The first real use exposed the gap: a Codex agent alternated `set-gpu-power 300 300`
+and `set-gpu-power` (restore 400 W). Ticking "delegate" copied the agent's note into
+the intent, so the rule memorised "300 W", the restore was judged a different task,
+and each approval stacked another delegation. The operator wants delegating to be
+the default, broad but smart, with forever as an option.
+
+- One human-facing concept on the sheet ("Remember"), two engines underneath: exact
+  grants (no model) and delegations (judged). Grants and delegations stay separate
+  tables.
+- Delegations gain a deterministic command filter. The filter admits; the intent
+  can only turn requests away. That is why a model-drafted intent is acceptable.
+- The intent is drafted by the model as a *kind of work*, linted, and anchored to
+  the program; the agent's text is never offered. `intent_source` records who wrote
+  it.
+- Risk and fit are separate questions in the prompt; fit ignores values.
+- All matching delegations are evaluated in one call, narrowest first; only the
+  narrowest rule's decline streak counts towards pausing it.
+- Widening replaces duplicating. Widening only grows scope and expiry.
+- Lengths: 1 hour, 1 day, 1 month, forever. A daily budget replaces the lifetime cap
+  so forever rules don't exhaust themselves. `automation.max_ttl_minutes` defaults
+  to 0 (no limit).
+- Passkey only for rules broader than a passkey-free "any arguments" grant. This
+  enables a one-tap "Approve & remember" notification action on browsers with
+  notification buttons; the update push goes only to Chrome's and Windows' push
+  services so Safari and Firefox don't buzz twice.
+- Not done: dropping `sudo -n` rows (they are already hidden by default and the
+  Activity page can show them), merging grants and delegations into one table, and
+  a per-rule memo that skips the model for byte-identical repeats.
+

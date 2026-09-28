@@ -8,7 +8,7 @@ export interface SessionInfo {
   vapid_public_key: string;
   push_enabled: boolean;
   advisor: { model: string; backend: string; auto_assess: boolean } | null;
-  automation: { configured: boolean; enabled: boolean };
+  automation: { configured: boolean; enabled: boolean; default_max_risk?: number };
   strong_auth_minutes: number;
   user?: { id: string; name: string; display_name: string; role: string };
   device?: { id: string; label: string };

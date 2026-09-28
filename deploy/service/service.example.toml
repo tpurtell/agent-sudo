@@ -35,7 +35,8 @@ builtin_classes = true                 # packages, services, root shells, creden
 [policy.automation]
 enabled = true                         # delegations are possible, never created automatically
 max_ttl_minutes = 0                    # longest delegation in minutes; 0 lets approvers pick "Forever"
-max_decisions = 100
+max_decisions = 0                      # lifetime approvals per delegation; 0 = no limit
+max_decisions_per_day = 50             # requests over this in 24 hours go to a person
 pause_after_declines = 5
 
 # Your own classes are matched before the built-in ones.

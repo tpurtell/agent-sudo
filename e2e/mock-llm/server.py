@@ -3,30 +3,43 @@
 
 It reads the request state and answers like a careful model would, so the
 delegation tests do not depend on a real provider:
-- package installs that mention nvidia/cuda/headers: low risk, relevant to driver work
-- anything with `nginx`: low risk but unrelated to the driver intent
+- package installs that mention nvidia/cuda/headers/dkms: low risk, "installing driver packages"
+- anything with `nginx`: low risk, "installing web server packages"
 - root shells: high risk
+Fit with each delegation is high when the delegation's intent names that kind of work.
 """
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+KINDS = [
+    (("nvidia", "cuda", "headers", "dkms"), "installing driver packages", ("driver", "nvidia")),
+    (("nginx",), "installing web server packages", ("web server", "nginx")),
+]
+
 def assess(state):
     req = state.get("request", {})
     words = " ".join([req.get("command") or ""] + req.get("arguments", [])).lower()
-    delegation = state.get("delegation")
-    driver = any(k in words for k in ("nvidia", "cuda", "headers", "dkms"))
-    risk, decision, relevance = 22, "approve", 0.9 if driver else 0.1
-    if "nginx" in words:
-        relevance, decision = 0.05, "ask"
-    if req.get("command", "").endswith(("bash", "sh")):
+    kind, markers = "running maintenance commands", ()
+    for keys, k, m in KINDS:
+        if any(x in words for x in keys):
+            kind, markers = k, m
+            break
+    risk, decision = 22, "approve"
+    if (req.get("command") or "").endswith(("bash", "sh")):
         risk, decision = 90, "ask"
+    fit = []
+    for d in state.get("delegations", []):
+        intent = d.get("intent", "").lower()
+        fit.append({"id": d["id"], "p": 0.9 if markers and any(m in intent for m in markers) else 0.05})
     return {
         "risk": risk,
         "confidence": 0.85,
         "dimensions": {"destructive": 0.05, "privilege_escape": 0.05, "persistence": 0.6, "credential_access": 0.0,
                        "network_security": 0.0, "availability": 0.1, "unusual": 0.1},
-        "relevance": relevance if delegation else None,
-        "suggestion": {"decision": decision, "command": "exact", "hosts": "host", "requester": "session", "ttl_minutes": 30},
+        "decision": decision,
+        "fit": fit,
+        "suggestion": {"remember": "program", "prefix_len": 0, "kind_of_work": kind, "hosts": "host",
+                       "requester": "session", "duration": "1d"},
         "summary": f"Mock assessment of {words[:60]}",
         "reasons": ["deterministic mock"],
     }

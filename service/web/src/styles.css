@@ -440,6 +440,36 @@ input[type="range"] { width: 100%; accent-color: var(--brand); }
 @media (min-width: 960px) { .decision-bar { bottom: 16px; } }
 .scope { display: flex; flex-direction: column; gap: 14px; }
 .scope .field > .label { display: flex; justify-content: space-between; }
+.choices { display: flex; flex-direction: column; gap: 8px; }
+.choice {
+  --accent: var(--brand);
+  display: flex; gap: 12px; align-items: flex-start; width: 100%; text-align: left;
+  padding: 12px 14px; border-radius: var(--radius-md); border: 1px solid var(--line);
+  background: var(--bg-elev); color: var(--text); font: inherit; cursor: pointer;
+  transition: border-color 0.15s, background 0.15s, box-shadow 0.15s;
+}
+.choice[data-row="kind"], .choice[data-row="any"] { --accent: var(--auto); }
+.choice:hover:not([disabled]) { background: var(--bg-hover); }
+.choice:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.choice.on { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); background: color-mix(in srgb, var(--accent) 7%, var(--bg-elev)); }
+.choice[disabled] { opacity: 0.45; cursor: not-allowed; }
+.choice-dot { position: relative; flex: none; width: 18px; height: 18px; margin-top: 2px; border-radius: 50%; border: 2px solid var(--line-strong); transition: border-color 0.15s; }
+.choice.on .choice-dot { border-color: var(--accent); }
+.choice.on .choice-dot::after { content: ""; position: absolute; inset: 3px; border-radius: 50%; background: var(--accent); }
+.choice-text { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.choice-title { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 15px; font-weight: 650; }
+.choice-sub { font-size: 12.5px; line-height: 1.4; color: var(--text-3); overflow-wrap: anywhere; }
+.chip.tiny-chip { font-size: 11px; padding: 1px 7px; gap: 3px; }
+.chip.tiny-chip svg { width: 11px; height: 11px; }
+.decision-bar.three { grid-template-columns: auto auto minmax(0, 1fr); }
+.decision-bar .btn { min-width: 0; }
+.decision-bar.three .btn:not(.approve) { padding: 0 16px; }
+.decision-bar .btn.approve { overflow: hidden; }
+@media (max-width: 400px) {
+  .decision-bar { padding: 10px; gap: 8px; }
+  .decision-bar.three .btn:not(.approve) { padding: 0 13px; }
+  .decision-bar.three .btn.approve { padding: 0 12px; font-size: 15px; }
+}
 .delegate-box { border: 1px dashed color-mix(in srgb, var(--auto) 55%, var(--line)); background: var(--auto-soft); border-radius: var(--radius-md); padding: 14px; display: flex; flex-direction: column; gap: 12px; }
 
 .outcome { display: flex; align-items: center; gap: 12px; padding: 14px 16px; border-radius: var(--radius-md); font-weight: 600; }

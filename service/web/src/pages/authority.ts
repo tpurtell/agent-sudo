@@ -77,6 +77,7 @@ function newDelegationSheet(hosts: HostView[], reload: () => void) {
   let notify = "each";
   sheet((close) => {
     const intent = h("textarea", { class: "input", rows: "3", placeholder: "e.g. Upgrading CUDA and rebuilding the NCCL plugin on the sparks" }) as HTMLTextAreaElement;
+    const programs = h("input", { class: "input mono", placeholder: "/usr/bin/apt /usr/bin/dpkg", autocapitalize: "off", autocorrect: "off", spellcheck: "false" }) as HTMLInputElement;
     const groupSel = h("select", { class: "input" }, ...groups.map((g) => h("option", { value: g }, g))) as HTMLSelectElement;
     groupSel.addEventListener("change", () => (group = groupSel.value));
     const hostSel = h("select", { class: "input" }, ...hosts.filter((x) => !x.revoked_at).map((x) => h("option", { value: x.id }, x.name))) as HTMLSelectElement;
@@ -107,6 +108,7 @@ function newDelegationSheet(hosts: HostView[], reload: () => void) {
           requester: "any",
           max_risk: maxRisk,
           notify,
+          programs: programs.value.split(/[\s,]+/).filter(Boolean),
         });
         toast("Delegation started");
         close();
@@ -121,6 +123,7 @@ function newDelegationSheet(hosts: HostView[], reload: () => void) {
         "div",
         { class: "stack" },
         field("Expected work", intent, "The model judges each request against this description."),
+        field("Programs", programs, "Optional absolute paths, separated by spaces. Only these programs are considered; leave empty for any command."),
         field("Hosts", segmented([{ value: "group", label: "A group", disabled: !groups.length }, { value: "host", label: "One host" }, { value: "all", label: "All hosts" }], scope, (v) => { scope = v as typeof scope; syncScope(); })),
         groupField,
         hostField,

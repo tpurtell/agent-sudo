@@ -57,12 +57,18 @@ agent (untrusted) ──exec──> agent-sudo (setuid root, sudo-rs fork)
    explicitly chooses "also unlock ordinary sudo", which requires a recent passkey.
 7. **The model never holds authority.** The advisor returns assessments. Automated
    approvals happen only when a human-created delegation matches and deterministic
-   limits pass: scope, time, decision count, risk ceiling, per-dimension ceilings,
-   relevance to the stated intent, and features that are never automated (root
-   shells, credentials, changes to sudo/PAM/agent-sudo, `sudo -v`, non-UTF-8
-   arguments). A deterministic risk floor stops a model from calling a root shell
-   routine. Model errors and timeouts fall back to a human. A kill switch, flagging,
-   and drift guards pause automation.
+   limits pass: scope, command filter, time, daily budget, risk ceiling,
+   per-dimension ceilings, fit with the stated kind of work, and features that are
+   never automated (root shells, credentials, changes to sudo/PAM/agent-sudo,
+   `sudo -v`, non-UTF-8 arguments). A deterministic risk floor stops a model from
+   calling a root shell routine. Model errors and timeouts fall back to a human. A
+   kill switch, flagging, and drift guards pause automation.
+   The model also drafts the kind of work a new delegation covers. That draft can
+   only narrow what a delegation approves (fit can only turn a request away); what a
+   delegation admits is set by its deterministic filter and scope, chosen by the
+   approver's tap. Drafts are linted (no values, paths, widening words, or text
+   echoed from the requester) and anchored to the program name, and the requester's
+   own explanation is never offered as an intent.
 8. **Browser actions are CSRF-safe and versioned.** Opaque server-side session tokens in
    `__Host-` cookies (`HttpOnly; Secure; SameSite=Strict`), a per-session CSRF header,
    and an Origin check on every state change. Decisions carry the request version;
@@ -90,7 +96,8 @@ agent (untrusted) ──exec──> agent-sudo (setuid root, sudo-rs fork)
 | Approve an ordinary request | a signed-in approver session |
 | Approve a class with `step_up = recent` (root shells, credentials) | passkey within `strong_auth_minutes` |
 | Approve a class with `step_up = always` (changes to sudo itself) | passkey within the last minute |
-| Refresh the sudo timestamp, create a delegation, resume a paused one | passkey within `strong_auth_minutes` |
+| Create or widen a delegation with a program filter, for one host or group, up to a day | a signed-in approver session |
+| Refresh the sudo timestamp; create or widen a delegation with no filter, for all hosts, for longer than a day, or with a raised risk ceiling; resume a paused one | passkey within `strong_auth_minutes` |
 | Turn automation on (turning it off needs nothing) | admin + recent passkey |
 | Enroll or revoke hosts, invite or change users, remove a passkey | admin (where relevant) + recent passkey |
 

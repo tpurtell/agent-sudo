@@ -81,11 +81,18 @@ Web Push payloads (encrypted per RFC 8291, VAPID per RFC 8292):
 
 ```json
 {"t": "request", "id": "req_…", "v": 1, "code": "K7QX", "title": "claude on moa wants sudo",
- "body": "apt install -y jq\nInstalling jq…", "quick": true, "danger": false, "url": "/r/req_…"}
+ "body": "apt install -y jq\nagent: Installing jq…\nSuggested: allow apt: installing packages for a day",
+ "quick": true, "remember": true, "update": false, "danger": false, "url": "/r/req_…"}
 {"t": "auto", "id": "req_…", "delegation": "dlg_…", "title": "Approved automatically on emu", "body": "…"}
 {"t": "digest", "delegation": "dlg_…", "title": "3 automated approvals", "body": "…"}
 ```
 
 `quick` requests get Approve/Deny notification buttons where the platform supports
-them (Edge, Chrome). The service worker posts the decision with the session's CSRF
+them (Edge, Chrome). `remember` means the model's suggestion can be applied without a
+passkey: the buttons become Approve & remember/Deny, which posts
+`{"version": v, "decision": "approve", "apply_suggestion": true}` and the service
+builds the grant or delegation from the stored suggestion. When the suggestion
+arrives after the first notification, the service sends an `update` push with the
+same tag to Chrome's and Windows' push services only, which replaces the
+notification silently. The service worker posts the decision with the session's CSRF
 token; anything needing a passkey opens the app instead.

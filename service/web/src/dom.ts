@@ -167,6 +167,39 @@ export const DELEGATION_DURATIONS: { value: string; label: string }[] = [
 ];
 export const DEFAULT_DELEGATION_MINUTES = 1440;
 
+/** "for an hour", "for a day", "for a month", "forever". */
+export function delegationLength(min: number): string {
+  if (min === 0) return "forever";
+  if (min === 60) return "for an hour";
+  if (min === 1440) return "for a day";
+  if (min === 43200) return "for a month";
+  return `for ${minutesLabel(min)}`;
+}
+
+/** Snap a suggested length to one of the offered choices. */
+export function snapDelegation(min: number | undefined): number {
+  if (min === undefined) return DEFAULT_DELEGATION_MINUTES;
+  if (min === 0) return 0;
+  const choices = DELEGATION_DURATIONS.map((d) => Number(d.value)).filter((m) => m > 0);
+  return choices.reduce((best, m) => (Math.abs(m - min) < Math.abs(best - min) ? m : best), choices[0]!);
+}
+
+export function basename(path: string | null | undefined): string {
+  return (path ?? "").split("/").pop() || "sudo";
+}
+
+/** Join two kinds of work without repeating either, as the service does. */
+export function combineIntents(old: string, next: string): string {
+  const o = old.trim();
+  const n = next.trim();
+  if (!n || o.toLowerCase().includes(n.toLowerCase())) return o;
+  if (!o || n.toLowerCase().includes(o.toLowerCase())) return n;
+  const [pa] = o.split(": ");
+  const [pb, ...rest] = n.split(": ");
+  if (rest.length && o.includes(": ") && pa!.toLowerCase() === pb!.toLowerCase()) return `${o}; ${rest.join(": ")}`;
+  return `${o}; ${n}`;
+}
+
 export function clock(ms: number): string {
   return new Date(ms).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
 }

@@ -1,6 +1,6 @@
 /* agent-sudo service worker: push notifications, notification actions, app shell cache. */
 
-const SHELL = "agent-sudo-shell-v1";
+const SHELL = "agent-sudo-shell-v2";
 
 self.addEventListener("install", (event) => {
   event.waitUntil(caches.open(SHELL).then((c) => c.addAll(["/", "/manifest.webmanifest", "/icons/icon-192.png"])).catch(() => {}));
@@ -70,19 +70,27 @@ self.addEventListener("push", (event) => {
   };
   if (data.t === "request") {
     options.tag = data.id;
-    options.renotify = true;
+    // An update (the model's suggestion arrived) replaces the notification quietly.
+    options.renotify = !data.update;
+    options.silent = !!data.update;
     options.requireInteraction = true;
-    options.actions = data.quick && supportsActions()
-      ? [
-          { action: "approve", title: "Approve once" },
-          { action: "deny", title: "Deny" },
-        ]
-      : [{ action: "open", title: "Review" }];
+    if (!supportsActions()) options.actions = [];
+    else if (data.remember) {
+      options.actions = [
+        { action: "remember", title: "Approve & remember" },
+        { action: "deny", title: "Deny" },
+      ];
+    } else if (data.quick) {
+      options.actions = [
+        { action: "approve", title: "Approve once" },
+        { action: "deny", title: "Deny" },
+      ];
+    } else options.actions = [{ action: "open", title: "Review" }];
     if (data.code) options.body = `[${data.code}] ${options.body}`;
   } else if (data.t === "auto") {
     options.tag = `auto-${data.id}`;
     options.silent = false;
-    if (supportsActions()) options.actions = [{ action: "pause", title: "Pause delegation" }, { action: "open", title: "View" }];
+    if (supportsActions()) options.actions = [{ action: "pause", title: "Pause rule" }, { action: "open", title: "View" }];
   } else if (data.t === "digest") {
     options.tag = `digest-${data.delegation}`;
   }
@@ -154,11 +162,15 @@ self.addEventListener("notificationclick", (event) => {
   note.close();
   event.waitUntil(
     (async () => {
-      if ((event.action === "approve" || event.action === "deny") && data.id) {
+      if ((event.action === "approve" || event.action === "deny" || event.action === "remember") && data.id) {
         try {
-          const r = await post(`/api/requests/${data.id}/decision`, { version: data.v, decision: event.action });
+          const body = event.action === "remember"
+            ? { version: data.v, decision: "approve", apply_suggestion: true }
+            : { version: data.v, decision: event.action };
+          const r = await post(`/api/requests/${data.id}/decision`, body);
           if (r.ok) {
-            await tell(`${event.action === "approve" ? "Approved" : "Denied"} ${data.code || ""}`.trim(), true);
+            const verb = event.action === "deny" ? "Denied" : event.action === "remember" ? "Approved and remembered" : "Approved";
+            await tell(`${verb} ${data.code || ""}`.trim(), true);
             return;
           }
           // Needs a passkey, was already decided, changed, or the session expired.

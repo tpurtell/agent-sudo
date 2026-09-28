@@ -434,7 +434,10 @@ pub fn template_kind_of_work(class: &ClassConfig) -> String {
 /// `{program}: {kind of work}`; the program anchor is deterministic.
 pub fn anchored_intent(program: &str, kind: &str) -> String {
     let kind = kind.trim().trim_end_matches('.');
-    if kind.to_lowercase().starts_with(&program.to_lowercase()) {
+    let lower = kind.to_lowercase();
+    let prog = program.to_lowercase();
+    // Already anchored ("apt: ..." or "apt ..."), but not "mounting" for `mount`.
+    if lower.starts_with(&format!("{prog}:")) || lower.starts_with(&format!("{prog} ")) {
         kind.to_string()
     } else {
         format!("{program}: {kind}")
@@ -641,6 +644,18 @@ mod tests {
         assert_eq!(a.suggestion.intent, "apt: installing packages");
         assert_eq!(a.suggestion.intent_source, IntentSource::Model);
         assert_eq!(a.risk, 10);
+    }
+
+    #[test]
+    fn the_anchor_respects_word_boundaries() {
+        assert_eq!(
+            anchored_intent("mount", "mounting network filesystems"),
+            "mount: mounting network filesystems"
+        );
+        assert_eq!(
+            anchored_intent("apt", "apt: installing packages"),
+            "apt: installing packages"
+        );
     }
 
     #[test]

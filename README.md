@@ -26,10 +26,12 @@ still just type the password.
 - **A decision assistant.** Any OpenAI-compatible model (or OpenRouter's Decisions
   API) scores risk across seven dimensions, reads recent fleet history, and pre-fills
   the scope you'd probably pick. Secrets are redacted before it sees anything.
-- **Delegations.** Hand the model a bounded slice of authority: "for the next hour,
-  approve work that fits *installing the NVIDIA driver stack on the sparks*, up to
-  low risk". Root shells, credentials and sudo changes always come back to you. One
-  switch stops all automation.
+- **Delegations.** Approve once and let the model handle *this kind of work* from
+  then on: the model drafts "set-gpu-power: adjusting GPU power limits", you tap
+  approve, and the next request for that program is judged in seconds, whatever the
+  values. Rules last an hour, a day, a month or forever; a second approval widens
+  the rule instead of piling up new ones. Root shells, credentials and sudo changes
+  always come back to you. One switch stops all automation.
 - **Built for the web you already have.** A PWA with Web Push: notification buttons
   on Edge and Chrome, Home Screen app on iPhone, Safari on the Mac.
 

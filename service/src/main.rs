@@ -202,6 +202,7 @@ async fn sample_assessment(
         .clone()
         .context("no [advisor] section in the config")?;
     let mut parts = command.split_whitespace().map(str::to_string);
+    let program = parts.clone().next();
     let env = agent_sudo_protocol::api::RequestEnvelope {
         client_request_id: "advisor-test".into(),
         mode: agent_sudo_protocol::api::Mode::Run,
@@ -227,7 +228,13 @@ async fn sample_assessment(
         chdir: None,
         tty: None,
         env: vec![],
-        executable: None,
+        // As hostd would report a root-owned system binary.
+        executable: program.map(|p| agent_sudo_protocol::api::ExecutableFacts {
+            real_path: p,
+            owner_uid: 0,
+            mode: 0o755,
+            writable_by_requester: false,
+        }),
         paths: vec![],
         session: agent_sudo_protocol::api::SessionInfo {
             fingerprint: "test".into(),

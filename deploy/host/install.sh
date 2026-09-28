@@ -39,7 +39,15 @@ if [ ! -e /etc/sudoers ] && [ ! -e /etc/sudoers-rs ]; then
     exit 1
 fi
 
-install -o root -g root -m 4755 "$here/agent-sudo" "$bin"
+install -o root -g root -m 0755 "$here/agent-sudo" "$bin"
+# Set setuid explicitly after ownership: some install implementations (e.g. the Rust
+# coreutils in newer Ubuntu) apply the owner after the mode, which clears the bit.
+chown root:root "$bin"
+chmod 4755 "$bin"
+if [ ! -u "$bin" ]; then
+    echo "error: could not set the setuid bit on $bin (is /usr/local mounted nosuid?)" >&2
+    exit 1
+fi
 install -o root -g root -m 0755 "$here/agent-sudo-hostd" "$sbin"
 install -o root -g root -m 0644 "$here/agent-sudo-hostd.service" "$unit"
 install -d -o root -g root -m 0755 /etc/agent-sudo

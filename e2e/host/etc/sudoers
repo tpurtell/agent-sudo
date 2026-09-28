@@ -1,0 +1,12 @@
+# End-to-end test policy. sudoers stays the ceiling: agent-sudo never widens it.
+# Note: when several rules match, the last one wins.
+Defaults env_reset
+Defaults timestamp_timeout=5
+Defaults secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+root  ALL=(ALL:ALL) ALL
+# Needs authentication for everything...
+agent ALL=(ALL:ALL) ALL
+# ...except one NOPASSWD command, which never reaches the approval service.
+agent ALL=(root) NOPASSWD: /usr/bin/id
+# `stranger` is deliberately absent: sudoers denies, the service is never asked.

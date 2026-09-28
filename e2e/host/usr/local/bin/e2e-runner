@@ -1,0 +1,137 @@
+#!/usr/bin/env python3
+"""Test-only control API for the e2e host container.
+
+POST /enroll {token}          enroll with the service and start hostd
+POST /hostd {action}          start | stop hostd
+POST /run {user, argv, tty}   start a command; returns {id}
+POST /send {id, data}         write to the command's terminal / stdin
+POST /signal {id, signal}     signal the command
+GET  /result/<id>?wait=S      {done, exit, output}
+GET  /file?path=...           read a file (for assertions on logs)
+"""
+import json, os, pty, pwd, signal, subprocess, termios, fcntl, threading, time, uuid
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlparse, parse_qs
+
+SERVICE = os.environ.get("SERVICE_URL", "https://sudo.e2e.test")
+CA = os.environ.get("CA_FILE", "/certs/ca.pem")
+jobs = {}
+hostd = {"proc": None}
+lock = threading.Lock()
+
+def start_hostd():
+    stop_hostd()
+    log = open("/var/log/hostd.log", "ab")
+    hostd["proc"] = subprocess.Popen(["/usr/local/sbin/agent-sudo-hostd", "run"], stdout=log, stderr=log)
+    for _ in range(50):
+        if os.path.exists("/run/agent-sudo/hostd.sock"):
+            return True
+        time.sleep(0.1)
+    return False
+
+def stop_hostd():
+    p = hostd["proc"]
+    if p and p.poll() is None:
+        p.terminate(); p.wait(5)
+    hostd["proc"] = None
+    try: os.remove("/run/agent-sudo/hostd.sock")
+    except FileNotFoundError: pass
+
+class Job:
+    def __init__(self, user, argv, tty, env):
+        pw = pwd.getpwnam(user)
+        base = {"PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "HOME": pw.pw_dir, "USER": user, "LOGNAME": user, "LANG": "C.UTF-8", "TERM": "xterm"}
+        base.update(env or {})
+        self.output = bytearray()
+        self.exit = None
+        self.master = None
+        kwargs = dict(user=pw.pw_uid, group=pw.pw_gid, extra_groups=os.getgrouplist(user, pw.pw_gid), cwd=pw.pw_dir, env=base)
+        if tty:
+            self.master, slave = pty.openpty()
+            def ctty():
+                fcntl.ioctl(0, termios.TIOCSCTTY, 0)
+            self.proc = subprocess.Popen(argv, stdin=slave, stdout=slave, stderr=slave, start_new_session=True, preexec_fn=ctty, **kwargs)
+            os.close(slave)
+            threading.Thread(target=self.pump_pty, daemon=True).start()
+        else:
+            # No controlling terminal at all: setsid, stdin from /dev/null. Like an agent.
+            self.proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True, **kwargs)
+            threading.Thread(target=self.pump_pipe, daemon=True).start()
+
+    def pump_pty(self):
+        while True:
+            try:
+                data = os.read(self.master, 4096)
+            except OSError:
+                break
+            if not data:
+                break
+            with lock: self.output += data
+        self.exit = self.proc.wait()
+
+    def pump_pipe(self):
+        for data in iter(lambda: self.proc.stdout.read1(4096), b""):
+            with lock: self.output += data
+        self.exit = self.proc.wait()
+
+class H(BaseHTTPRequestHandler):
+    def log_message(self, *a): pass
+
+    def reply(self, code, obj):
+        body = json.dumps(obj).encode()
+        self.send_response(code); self.send_header("content-type", "application/json")
+        self.send_header("content-length", str(len(body))); self.end_headers(); self.wfile.write(body)
+
+    def body(self):
+        n = int(self.headers.get("content-length") or 0)
+        return json.loads(self.rfile.read(n) or b"{}")
+
+    def do_GET(self):
+        u = urlparse(self.path); q = parse_qs(u.query)
+        if u.path.startswith("/result/"):
+            job = jobs.get(u.path.split("/")[-1])
+            if not job: return self.reply(404, {})
+            deadline = time.time() + float(q.get("wait", ["0"])[0])
+            while job.exit is None and time.time() < deadline:
+                time.sleep(0.05)
+            with lock: out = job.output.decode(errors="replace")
+            return self.reply(200, {"done": job.exit is not None, "exit": job.exit, "output": out})
+        if u.path == "/file":
+            try: return self.reply(200, {"text": open(q["path"][0], errors="replace").read()})
+            except OSError as e: return self.reply(404, {"error": str(e)})
+        if u.path == "/health":
+            return self.reply(200, {"ok": True, "hostd": bool(hostd["proc"] and hostd["proc"].poll() is None)})
+        self.reply(404, {})
+
+    def do_POST(self):
+        try:
+            self.post()
+        except Exception as e:  # report instead of dropping the connection
+            self.reply(500, {"error": f"{type(e).__name__}: {e}"})
+
+    def post(self):
+        u = urlparse(self.path); b = self.body()
+        if u.path == "/enroll":
+            r = subprocess.run(["/usr/local/sbin/agent-sudo-hostd", "enroll", "--service", SERVICE, "--token", b["token"], "--ca-file", CA, "--name", b.get("name", "e2e-host"), "--force"], capture_output=True, text=True)
+            if r.returncode != 0: return self.reply(500, {"error": r.stderr + r.stdout})
+            return self.reply(200, {"ok": start_hostd(), "output": r.stdout})
+        if u.path == "/hostd":
+            ok = start_hostd() if b["action"] == "start" else (stop_hostd() or True)
+            return self.reply(200, {"ok": ok})
+        if u.path == "/run":
+            job = Job(b.get("user", "agent"), b["argv"], b.get("tty", False), b.get("env"))
+            jid = uuid.uuid4().hex; jobs[jid] = job
+            return self.reply(200, {"id": jid})
+        if u.path == "/send":
+            job = jobs[b["id"]]
+            data = b["data"].encode()
+            if job.master is not None: os.write(job.master, data)
+            return self.reply(200, {"ok": True})
+        if u.path == "/signal":
+            job = jobs[b["id"]]
+            os.killpg(job.proc.pid, getattr(signal, b.get("signal", "SIGINT")))
+            return self.reply(200, {"ok": True})
+        self.reply(404, {})
+
+if __name__ == "__main__":
+    ThreadingHTTPServer(("0.0.0.0", 9000), H).serve_forever()

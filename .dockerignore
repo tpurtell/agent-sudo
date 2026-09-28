@@ -1,0 +1,8 @@
+target
+sudo/target
+**/node_modules
+service/web/dist
+e2e/test-results
+e2e/playwright-report
+private
+.git

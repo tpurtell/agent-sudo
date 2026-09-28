@@ -1,0 +1,14 @@
+public_url = "https://sudo.e2e.test"
+name = "agent-sudo e2e"
+listen = "0.0.0.0:8080"
+database = "/data/agent-sudo.db"
+trusted_proxies = ["proxy"]
+
+[push]
+enabled = true
+subject = "mailto:e2e@example.com"
+
+[advisor]
+url = "http://mock-llm:8000/v1"
+model = "mock"
+timeout_secs = 10

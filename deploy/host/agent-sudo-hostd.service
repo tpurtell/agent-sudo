@@ -1,0 +1,41 @@
+[Unit]
+Description=agent-sudo host relay
+Documentation=https://github.com/tpurtell/agent-sudo
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/etc/agent-sudo/hostd.toml
+
+[Service]
+ExecStart=/usr/local/sbin/agent-sudo-hostd run
+Restart=always
+RestartSec=2
+RuntimeDirectory=agent-sudo
+RuntimeDirectoryMode=0700
+# Runs as root to read /proc of the requesting process tree and to own the socket
+# that the setuid binary trusts. Everything else is locked down.
+CapabilityBoundingSet=CAP_SYS_PTRACE CAP_DAC_READ_SEARCH
+AmbientCapabilities=
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/run/agent-sudo
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

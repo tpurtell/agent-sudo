@@ -14,3 +14,4 @@ dist/
 service/web/dist/
 test-results/
 playwright-report/
+e2e/.work/

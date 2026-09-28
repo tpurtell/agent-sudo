@@ -257,7 +257,15 @@ pub(crate) fn authenticate(
 
     let mut conn = match Connection::connect(&cfg.socket) {
         Ok(conn) => conn,
-        Err(e) => return unavailable(pam, &mut password, e.to_string()),
+        Err(e) => {
+            let reason = match e.kind() {
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused => {
+                    format!("agent-sudo-hostd is not running ({})", cfg.socket.display())
+                }
+                _ => e.to_string(),
+            };
+            return unavailable(pam, &mut password, reason);
+        }
     };
     let request = build_request(context, &opts, timeout, nonblocking, interactive);
     if let Err(e) = conn.send(request) {

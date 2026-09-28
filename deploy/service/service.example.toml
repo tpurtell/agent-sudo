@@ -1,0 +1,47 @@
+# agent-sudo approval service configuration.
+# ${VAR} is replaced from the environment, so secrets can live in .env.
+
+# The exact HTTPS origin browsers use. Passkeys are bound to it: changing it later
+# means re-registering passkeys. With the Tailscale profile this is
+# https://<TS_HOSTNAME>.<tailnet>.ts.net
+public_url = "${AGENT_SUDO_PUBLIC_URL}"
+name = "agent-sudo"
+listen = "0.0.0.0:8080"
+database = "/data/agent-sudo.db"
+
+[sessions]
+idle_days = 7          # sign in again after a week without use
+absolute_days = 30     # and at least monthly
+strong_auth_minutes = 5
+
+[push]
+enabled = true
+subject = "mailto:${AGENT_SUDO_ADMIN_EMAIL}"
+
+# Optional decision model. Remove this section to run without risk scores.
+[advisor]
+backend = "openai"                     # or "decisions" for OpenRouter's Decisions API
+url = "${AGENT_SUDO_ADVISOR_URL}"      # e.g. https://openrouter.ai/api/v1 or your gateway's /v1
+model = "${AGENT_SUDO_ADVISOR_MODEL}"
+api_key = "${AGENT_SUDO_ADVISOR_KEY}"
+response_format = "json_object"        # json_schema where the provider supports strict schemas
+timeout_secs = 30
+history_max_requests = 20
+history_max_age_minutes = 120
+
+[policy]
+builtin_classes = true                 # packages, services, root shells, credentials, ...
+
+[policy.automation]
+enabled = true                         # delegations are possible, never created automatically
+max_ttl_minutes = 480
+max_decisions = 100
+pause_after_declines = 5
+
+# Your own classes are matched before the built-in ones.
+# [[policy.classes]]
+# name = "gpu-services"
+# title = "Restart GPU daemons"
+# executables = ["/usr/bin/systemctl"]
+# argv_prefix = ["restart", "nvidia-persistenced.service"]
+# max_ttl_minutes = 120

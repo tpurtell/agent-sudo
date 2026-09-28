@@ -1,0 +1,8 @@
+#!/bin/sh
+# The e2e host: fix ownership the image build can't express, then serve the runner.
+set -eu
+chown root:root /etc/agent-sudo /etc/agent-sudo/client.conf
+chmod 0755 /etc/agent-sudo
+chmod 0644 /etc/agent-sudo/client.conf
+mkdir -p /run/agent-sudo && chmod 0700 /run/agent-sudo
+exec python3 /usr/local/bin/e2e-runner

@@ -55,6 +55,11 @@ struct Cli {
 enum Command {
     /// Run the service (default).
     Serve,
+    /// Exit 0 if the service answers on URL (for container health checks).
+    Health {
+        #[arg(default_value = "http://127.0.0.1:8080/api/health")]
+        url: String,
+    },
     /// Validate the configuration and exit.
     CheckConfig,
     /// Print a fresh first-run setup link (only while no users exist).
@@ -253,6 +258,15 @@ async fn main() -> Result<()> {
         .with_target(false)
         .init();
     let cli = Cli::parse();
+    if let Some(Command::Health { url }) = &cli.command {
+        let ok = reqwest::Client::new()
+            .get(url)
+            .timeout(std::time::Duration::from_secs(4))
+            .send()
+            .await
+            .is_ok_and(|r| r.status().is_success());
+        std::process::exit(if ok { 0 } else { 1 });
+    }
     let cfg = ServiceConfig::load(&cli.config)?;
     match cli.command.unwrap_or(Command::Serve) {
         Command::CheckConfig => {
@@ -312,7 +326,7 @@ async fn main() -> Result<()> {
                 Command::AdvisorTest { command, context } => {
                     advisor_test(state, command, context).await
                 }
-                Command::CheckConfig => unreachable!(),
+                Command::CheckConfig | Command::Health { .. } => unreachable!(),
             }
         }
     }

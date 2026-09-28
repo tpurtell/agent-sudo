@@ -88,9 +88,14 @@ self.addEventListener("push", (event) => {
     } else options.actions = [{ action: "open", title: "Review" }];
     if (data.code) options.body = `[${data.code}] ${options.body}`;
   } else if (data.t === "auto") {
-    options.tag = `auto-${data.id}`;
-    options.silent = false;
-    if (supportsActions()) options.actions = [{ action: "pause", title: "Pause rule" }, { action: "open", title: "View" }];
+    // A request that was waiting when a rule approved it: replace its notification quietly.
+    options.tag = data.replaces ? data.id : `auto-${data.id}`;
+    options.silent = !!data.replaces;
+    if (supportsActions()) {
+      options.actions = data.delegation
+        ? [{ action: "pause", title: "Pause rule" }, { action: "open", title: "View" }]
+        : [{ action: "open", title: "View" }];
+    }
   } else if (data.t === "digest") {
     options.tag = `digest-${data.delegation}`;
   }

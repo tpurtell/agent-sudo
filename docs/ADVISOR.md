@@ -122,6 +122,12 @@ same program) instead of creating another: the filters are joined, the intent
 becomes both kinds of work, and hosts, requester and expiry only ever grow. A paused
 rule can be resumed and widened in the same step.
 
+Requests that were already waiting when a rule was created, widened or resumed get
+the same check a new request would, so approving one of a batch of identical
+requests with **Remember** releases the others. This also applies to plain grants.
+Each released request's notification is replaced quietly. Declines from these
+re-checks don't count towards pausing the new rule.
+
 Delegations pause themselves after `pause_after_declines` declines in a row (counted
 for the narrowest matching rule only), or when anyone flags one of their approvals.
 `max_decisions` (0 by default) optionally adds a lifetime limit.

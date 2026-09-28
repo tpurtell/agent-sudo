@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Creating, widening or resuming a delegation or grant now re-checks the requests
+  already waiting, so remembering one of a batch (the same command on six hosts)
+  releases the rest instead of leaving each for a human. Their notifications are
+  replaced quietly with the outcome.
 - The advisor's secret filter now knows which arguments common programs take as
   passwords (`mysql -p…`, `sshpass -p`, `curl -u`, `htpasswd -b`, `openssl passwd`,
   `smbclient -U user%…`, `nmcli`, LDAP, Redis, IPMI and more), hides what is echoed

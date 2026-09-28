@@ -800,6 +800,8 @@ async fn grant_resume(
         json!({}),
     );
     state.emit(Event::Grants);
+    let st = state.clone();
+    tokio::spawn(async move { engine::recheck_pending(&st, &id).await });
     Ok(Json(json!({"ok": true})))
 }
 
@@ -849,6 +851,8 @@ async fn delegation_create(
         }
     };
     let (id, spec) = engine::create_delegation(&state, &s, &host, &input.delegate)?;
+    let (st, changed) = (state.clone(), id.clone());
+    tokio::spawn(async move { engine::recheck_pending(&st, &changed).await });
     Ok(Json(json!({"id": id, "spec": spec})))
 }
 

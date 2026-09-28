@@ -1351,3 +1351,139 @@ async fn the_suggestion_can_be_applied_in_one_tap() {
     assert_eq!(spec["commands"][0]["match"], "executable");
     assert!(!spec["intent"].as_str().unwrap().contains("300"));
 }
+
+impl Harness {
+    /// Wait for a request to leave `pending` (re-checks run in the background).
+    async fn settled(&self, id: &str) -> Value {
+        for _ in 0..100 {
+            let (_, r) = self
+                .web("GET", &format!("/api/requests/{id}"), Value::Null)
+                .await;
+            if r["state"] != "pending" {
+                return r;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let (_, r) = self
+            .web("GET", &format!("/api/requests/{id}"), Value::Null)
+            .await;
+        r
+    }
+}
+
+#[tokio::test]
+async fn a_new_delegation_releases_requests_already_waiting() {
+    let (h, _fit, _calls) = v2_harness("").await;
+    let mut ids = vec![];
+    for _ in 0..3 {
+        let (_, r) = h.submit(GPU, &["300"], |_| {}).await;
+        assert_eq!(r["state"], "pending");
+        ids.push(r["id"].as_str().unwrap().to_string());
+    }
+    let (_, other) = h
+        .submit("/usr/bin/nvidia-smi", &["-pl", "300"], |_| {})
+        .await;
+    h.weaken_session();
+    let (status, d) = h
+        .decide(
+            &ids[0],
+            json!({"version": 1, "decision": "approve", "delegate": {
+            "intent": "set-gpu-power: adjusting GPU power limits", "ttl_minutes": 1440,
+            "hosts": "host", "requester": "user", "filter": "program"}}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{d}");
+    let rule = h.delegations().await[0]["id"].clone();
+    for id in &ids[1..] {
+        let r = h.settled(id).await;
+        assert_eq!(r["state"], "approved", "{r}");
+        assert_eq!(r["decision"]["decision"]["via"], "delegation");
+        assert_eq!(r["delegation_id"], rule);
+    }
+    // Outside the rule's program filter: still waiting for a human.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let (_, other) = h
+        .web(
+            "GET",
+            &format!("/api/requests/{}", other["id"].as_str().unwrap()),
+            Value::Null,
+        )
+        .await;
+    assert_eq!(other["state"], "pending");
+}
+
+#[tokio::test]
+async fn a_new_grant_releases_identical_requests_already_waiting() {
+    let h = Harness::new("").await;
+    let (_, first) = h
+        .submit("/usr/bin/apt", &["install", "-y", "jq"], |_| {})
+        .await;
+    let (_, same) = h
+        .submit("/usr/bin/apt", &["install", "-y", "jq"], |_| {})
+        .await;
+    let (_, different) = h
+        .submit("/usr/bin/apt", &["install", "-y", "curl"], |_| {})
+        .await;
+    let (status, d) = h
+        .decide(
+            first["id"].as_str().unwrap(),
+            json!({"version": 1, "decision": "approve",
+                   "scope": {"command": "exact", "requester": "user", "ttl_minutes": 30}}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{d}");
+    let r = h.settled(same["id"].as_str().unwrap()).await;
+    assert_eq!(r["state"], "approved", "{r}");
+    assert_eq!(r["decision"]["decision"]["via"], "grant");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let (_, different) = h
+        .web(
+            "GET",
+            &format!("/api/requests/{}", different["id"].as_str().unwrap()),
+            Value::Null,
+        )
+        .await;
+    assert_eq!(different["state"], "pending");
+}
+
+#[tokio::test]
+async fn declining_its_own_batch_does_not_pause_a_new_rule() {
+    use std::sync::atomic::Ordering;
+    let (h, fit, calls) = v2_harness("[policy.automation]\npause_after_declines = 2\n").await;
+    fit.store(10, Ordering::SeqCst);
+    let mut ids = vec![];
+    for _ in 0..4 {
+        let (_, r) = h.submit(GPU, &["300"], |_| {}).await;
+        ids.push(r["id"].as_str().unwrap().to_string());
+    }
+    h.weaken_session();
+    let (status, d) = h
+        .decide(
+            &ids[0],
+            json!({"version": 1, "decision": "approve", "delegate": {
+            "intent": "set-gpu-power: adjusting GPU power limits", "ttl_minutes": 1440,
+            "hosts": "host", "requester": "user", "filter": "program"}}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{d}");
+    for _ in 0..100 {
+        if calls.load(Ordering::SeqCst) >= 3 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let (_, r) = h
+        .web("GET", &format!("/api/requests/{}", ids[1]), Value::Null)
+        .await;
+    assert_eq!(r["state"], "pending", "{r}");
+    assert!(
+        !r["assessment"]["delegation_checks"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "{r}"
+    );
+    let rules = h.delegations().await;
+    assert!(rules[0]["paused_at"].is_null(), "{}", rules[0]);
+}

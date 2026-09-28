@@ -540,33 +540,17 @@ pub async fn submit(
         row.state = RequestState::Denied;
         row.decision = Some(d);
     } else if let Some(g) = matching_grant(state, &row, &facts, &class)? {
-        let spec: GrantSpec = serde_json::from_value(g.spec.clone())?;
-        let mut d = automatic_decision(
-            RequestState::Approved,
-            DecidedVia::Grant,
-            &g.created_by,
-            &grant_summary(state, &g),
-        );
-        d.decision.refresh_timestamp = spec.refresh_timestamp;
-        d.grant = Some(g.id.clone());
         row.state = RequestState::Approved;
         row.grant_id = Some(g.id.clone());
-        row.decision = Some(d);
+        row.decision = Some(grant_decision(state, &g)?);
     } else if let Some((winner, stored)) =
-        evaluate_delegations(state, &row, host, &facts, &class).await?
+        evaluate_delegations(state, &row, host, &facts, &class, true).await?
     {
         row.assessment = stored;
         if let Some(delegation) = winner {
-            let mut d = automatic_decision(
-                RequestState::Approved,
-                DecidedVia::Delegation,
-                &delegation.created_by,
-                &delegation.label,
-            );
-            d.delegation = Some(delegation.id.clone());
             row.state = RequestState::Approved;
             row.delegation_id = Some(delegation.id.clone());
-            row.decision = Some(d);
+            row.decision = Some(delegation_decision(&delegation));
             auto_delegation = Some(delegation);
         }
     }
@@ -626,6 +610,174 @@ pub async fn submit(
         tokio::spawn(async move { notify_automated(&s, &r, &delegation).await });
     }
     Ok(response_for(state, &row))
+}
+
+fn grant_decision(state: &AppState, g: &GrantRow) -> anyhow::Result<DecisionRecord> {
+    let spec: GrantSpec = serde_json::from_value(g.spec.clone())?;
+    let mut d = automatic_decision(
+        RequestState::Approved,
+        DecidedVia::Grant,
+        &g.created_by,
+        &grant_summary(state, g),
+    );
+    d.decision.refresh_timestamp = spec.refresh_timestamp;
+    d.grant = Some(g.id.clone());
+    Ok(d)
+}
+
+fn delegation_decision(delegation: &GrantRow) -> DecisionRecord {
+    let mut d = automatic_decision(
+        RequestState::Approved,
+        DecidedVia::Delegation,
+        &delegation.created_by,
+        &delegation.label,
+    );
+    d.delegation = Some(delegation.id.clone());
+    d
+}
+
+/// A grant or delegation was just created, widened or resumed. Requests already
+/// waiting that it covers get the check a new request would, so remembering one of
+/// a batch of identical requests releases the rest.
+pub async fn recheck_pending(state: &Shared, changed: &str) {
+    let pending: anyhow::Result<Vec<RequestRow>> = (|| {
+        let db = state.db.lock();
+        let mut stmt =
+            db.prepare("SELECT * FROM requests WHERE state = 'pending' AND deadline_at > ?1")?;
+        let rows = stmt
+            .query_map([now_ms()], row_request)?
+            .collect::<Result<_, _>>()?;
+        Ok(rows)
+    })();
+    let pending = match pending {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!("recheck after {changed}: {e:#}");
+            return;
+        }
+    };
+    let checks: Vec<_> = pending
+        .into_iter()
+        .map(|row| {
+            let s = state.clone();
+            let changed = changed.to_string();
+            tokio::spawn(async move {
+                if let Err(e) = recheck_one(&s, row, &changed).await {
+                    tracing::warn!("recheck after {changed}: {e:#}");
+                }
+            })
+        })
+        .collect();
+    for c in checks {
+        let _ = c.await;
+    }
+}
+
+async fn recheck_one(state: &Shared, row: RequestRow, changed: &str) -> anyhow::Result<()> {
+    let (Some(host), Some(rule)) = (host(state, &row.host_id)?, grant(state, changed)?) else {
+        return Ok(());
+    };
+    let class = class_named(state, &row.class);
+    if class.always_deny {
+        return Ok(());
+    }
+    let facts = HostFacts {
+        host_id: &host.id,
+        groups: &host.groups,
+    };
+    let mut decision = None;
+    let mut delegation = None;
+    let mut checks = None;
+    if rule.kind == "grant" {
+        let covers = serde_json::from_value::<GrantSpec>(rule.spec.clone()).is_ok_and(|spec| {
+            grants::grant_matches(&spec, &row.envelope, &row.features, &facts, &class)
+        });
+        if !covers {
+            return Ok(());
+        }
+        if let Some(g) = matching_grant(state, &row, &facts, &class)? {
+            decision = Some((grant_decision(state, &g)?, g));
+        }
+    } else {
+        let candidates = candidate_delegations(state, &row, &facts, &class)?;
+        if !candidates.iter().any(|(g, _)| g.id == changed) {
+            return Ok(());
+        }
+        if let Some((winner, stored)) =
+            evaluate_delegations(state, &row, &host, &facts, &class, false).await?
+        {
+            if let Some(g) = winner {
+                decision = Some((delegation_decision(&g), g.clone()));
+                delegation = Some(g);
+            }
+            checks = Some(stored);
+        }
+    }
+    // Keep the assessment the approver may be looking at (a one-tap notification is
+    // bound to it); add what the rules concluded.
+    let merge = |s: &mut StoredAssessment| {
+        if let Some(new) = checks.clone() {
+            s.delegation_checks = new.delegation_checks;
+            s.delegation_check = new.delegation_check;
+            if s.assessment.is_none() && !s.running {
+                s.assessment = new.assessment;
+                s.failure = new.failure;
+            }
+        }
+    };
+    let Some((mut record, used)) = decision else {
+        if checks.is_some() {
+            set_assessment(state, &row.id, merge);
+        }
+        return Ok(());
+    };
+    let now = now_ms();
+    record.at = now;
+    let mut stored = row.assessment.clone();
+    merge(&mut stored);
+    let changed_rows = state.db.lock().execute(
+        "UPDATE requests SET state = 'approved', version = version + 1, updated_at = ?1, decision_json = ?2,
+            decided_at = ?1, grant_id = ?3, delegation_id = ?4, assessment_json = ?5
+         WHERE id = ?6 AND state = 'pending'",
+        params![
+            now,
+            serde_json::to_string(&record)?,
+            record.grant,
+            record.delegation,
+            serde_json::to_string(&stored)?,
+            row.id
+        ],
+    )?;
+    if changed_rows == 0 {
+        // Decided or cancelled while the model was thinking: give the use back.
+        state.db.lock().execute(
+            "UPDATE grants SET uses = uses - 1 WHERE id = ?1 AND uses > 0",
+            [&used.id],
+        )?;
+        state.emit(Event::Grants);
+        return Ok(());
+    }
+    audit::record(
+        &state.db,
+        &format!("{}:{}", used.kind, used.id),
+        "request.approved",
+        Some(&row.id),
+        json!({
+            "command": policy::display_command(&row.envelope),
+            "host": host.name,
+            "via": record.decision.via,
+            "grant": record.grant,
+            "delegation": record.delegation,
+            "while_waiting": true,
+        }),
+    );
+    state.emit(Event::Request {
+        id: row.id.clone(),
+        state: RequestState::Approved.as_str().into(),
+        version: row.version + 1,
+    });
+    notify_released(state, &row, &used, delegation.as_ref()).await;
+    Ok(())
 }
 
 fn insert(state: &AppState, row: &RequestRow) -> anyhow::Result<()> {
@@ -834,6 +986,7 @@ async fn evaluate_delegations(
     host: &HostRow,
     facts: &HostFacts<'_>,
     class: &ClassConfig,
+    count_declines: bool,
 ) -> anyhow::Result<Option<(Option<GrantRow>, StoredAssessment)>> {
     if !state.automation_enabled() {
         return Ok(None);
@@ -927,8 +1080,9 @@ async fn evaluate_delegations(
         .cloned();
 
     // Only the narrowest candidate's streak counts: a broad rule is not paused by
-    // requests a narrower rule owns.
-    if let Some((first, _)) = candidates.first() {
+    // requests a narrower rule owns. Re-checking requests that were already waiting
+    // doesn't count either: a new rule shouldn't pause over the batch it came from.
+    if let Some((first, _)) = candidates.first().filter(|_| count_declines) {
         match &winner {
             Some(w) if w.id == first.id => track_declines(state, first, true),
             None if narrowest_verdict_declined => track_declines(state, first, false),
@@ -1652,6 +1806,10 @@ pub fn decide(state: &Shared, session: &Session, id: &str, input: DecideInput) -
     });
     if grant_id.is_some() || delegation_id.is_some() {
         state.emit(Event::Grants);
+    }
+    if let Some(changed) = grant_id.clone().or_else(|| delegation_id.clone()) {
+        let s = state.clone();
+        tokio::spawn(async move { recheck_pending(&s, &changed).await });
     }
     let updated = request(state, &row.id)?.ok_or_else(|| ApiError::not_found("gone"))?;
     Ok(request_view(state, &updated, true))
@@ -2564,6 +2722,39 @@ async fn notify_automated(state: &Shared, row: &RequestRow, delegation: &GrantRo
             push::fan_out(&state.push, &state.db, subs, &payload, 600, None).await;
         }
     }
+}
+
+/// A request that was waiting was approved by a rule made or changed since. Replace
+/// its notification, which would otherwise still ask for a decision.
+async fn notify_released(
+    state: &Shared,
+    row: &RequestRow,
+    rule: &GrantRow,
+    delegation: Option<&GrantRow>,
+) {
+    if let Some(d) = delegation {
+        let spec: Option<DelegationSpec> = serde_json::from_value(d.spec.clone()).ok();
+        if spec.map(|s| s.notify).unwrap_or_default() == NotifyMode::Digest {
+            notify_automated(state, row, d).await;
+        }
+    }
+    if !state.push.enabled() {
+        return;
+    }
+    let Ok(subs) = push::subscriptions_for_approvers(&state.db) else {
+        return;
+    };
+    let host = host_name(state, &row.host_id);
+    let payload = json!({
+        "t": "auto",
+        "replaces": true,
+        "id": row.id,
+        "delegation": delegation.map(|d| d.id.clone()),
+        "title": format!("Approved on {host} by a rule you just made"),
+        "body": format!("[{}] {}\n{}", row.code, truncate(&policy::display_command(&row.envelope), 120), truncate(&rule.label, 80)),
+        "url": format!("/r/{}", row.id),
+    });
+    push::fan_out(&state.push, &state.db, subs, &payload, 600, None).await;
 }
 
 async fn send_digests(state: &Shared) {

@@ -23,7 +23,8 @@ services:
   # Tailscale sidecar: joins your tailnet as $TS_HOSTNAME and serves the service on
   # https://$TS_HOSTNAME.<tailnet>.ts.net with an automatic Let's Encrypt certificate.
   # Only tailnet devices can reach it. Requires MagicDNS and HTTPS certificates to be
-  # enabled in the tailnet admin console.
+  # enabled in the tailnet admin console. Without TS_AUTHKEY it prints a login link
+  # to approve once; its identity then persists in the `tailscale` volume.
   tailscale:
     profiles: [tailscale]
     image: tailscale/tailscale:stable

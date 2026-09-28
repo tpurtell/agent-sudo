@@ -15,6 +15,8 @@ use crate::{
 use super::auth_and_update_record_file;
 
 pub(in crate::sudo) fn run_list(cmd_opts: SudoListOptions) -> Result<(), Error> {
+    #[cfg(feature = "agent-approval")]
+    crate::sudo::agent::set_mode(crate::sudo::agent::Mode::List);
     let verbose_list_mode = cmd_opts.list.is_verbose();
     let other_user = cmd_opts
         .other_user

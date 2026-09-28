@@ -343,6 +343,16 @@ impl TimeoutRead<'_> {
             None => -1,
         };
 
+        // agent-sudo: let a remote decision interrupt the prompt (no-op unless armed).
+        #[cfg(feature = "agent-approval")]
+        match super::remote_wake::wait(self.fd.as_raw_fd(), pollmask, timeout)? {
+            super::remote_wake::Wait::Ready => {}
+            super::remote_wake::Wait::Woken => return Err(super::remote_wake::woken_error()),
+            super::remote_wake::Wait::TimedOut => {
+                return Err(io::Error::from(io::ErrorKind::TimedOut));
+            }
+        }
+
         // SAFETY: pollfd is initialized and its length matches
         cerr(unsafe {
             libc::poll(

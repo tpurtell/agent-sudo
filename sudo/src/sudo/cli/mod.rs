@@ -509,6 +509,7 @@ fn demand_utf8(arg: &OsStr) -> String {
 
 impl SudoArg {
     const TAKES_ARGUMENT_SHORT: &'static [char] = &['D', 'g', 'h', 'p', 'R', 'U', 'u'];
+    #[cfg(not(feature = "agent-approval"))]
     const TAKES_ARGUMENT: &'static [&'static str] = &[
         "chdir",
         "group",
@@ -517,6 +518,20 @@ impl SudoArg {
         "other-user",
         "user",
         "prompt",
+    ];
+    // agent-sudo: the upstream list plus the agent options.
+    #[cfg(feature = "agent-approval")]
+    const TAKES_ARGUMENT: &'static [&'static str] = &[
+        "chdir",
+        "group",
+        "host",
+        "chroot",
+        "other-user",
+        "user",
+        "prompt",
+        "agent-context",
+        "agent-session",
+        "approval-timeout",
     ];
 
     /// argument assignments and shorthand options preprocessing
@@ -655,6 +670,9 @@ impl SudoOptions {
             .into_iter()
             .peekable();
 
+        #[cfg(feature = "agent-approval")]
+        let mut agent = crate::sudo::agent::AgentOptions::default();
+
         for arg in arg_iter {
             match arg {
                 SudoArg::Flag(flag) => match flag.as_str() {
@@ -712,6 +730,10 @@ impl SudoOptions {
                     "-v" | "--validate" => {
                         options.validate = true;
                     }
+                    #[cfg(feature = "agent-approval")]
+                    "--no-remote" => {
+                        agent.no_remote = true;
+                    }
                     _option => {
                         Err(xlat!("invalid option provided"))?;
                     }
@@ -741,6 +763,21 @@ impl SudoOptions {
                     "-u" | "--user" => {
                         options.user = Some(SudoString::from_cli_string(value));
                     }
+                    #[cfg(feature = "agent-approval")]
+                    "--agent-context" => {
+                        agent.context = Some(value);
+                    }
+                    #[cfg(feature = "agent-approval")]
+                    "--agent-session" => {
+                        agent.session = Some(value);
+                    }
+                    #[cfg(feature = "agent-approval")]
+                    "--approval-timeout" => {
+                        agent.timeout = Some(
+                            crate::sudo::agent::config::parse_duration(&value)
+                                .ok_or_else(|| format!("invalid --approval-timeout: {value}"))?,
+                        );
+                    }
                     _option => {
                         Err(xlat!("invalid option provided"))?;
                     }
@@ -769,6 +806,11 @@ impl SudoOptions {
                     options.positional_args = rest;
                 }
             }
+        }
+
+        #[cfg(feature = "agent-approval")]
+        if !agent.is_empty() {
+            crate::sudo::agent::set_options(agent);
         }
 
         Ok(options)

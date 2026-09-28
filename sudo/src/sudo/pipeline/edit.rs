@@ -5,6 +5,8 @@ use crate::sudoers::Authorization;
 use crate::system::audit;
 
 pub fn run_edit(edit_opts: SudoEditOptions) -> Result<(), Error> {
+    #[cfg(feature = "agent-approval")]
+    crate::sudo::agent::set_mode(crate::sudo::agent::Mode::Edit);
     let policy = super::read_sudoers()?;
 
     let context = Context::from_edit_opts(edit_opts)?;

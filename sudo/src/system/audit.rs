@@ -98,9 +98,9 @@ pub(crate) fn sudo_call<T>(
     Ok(result)
 }
 
-#[cfg(feature = "unstable-remote-sudoers")]
+#[cfg(any(feature = "unstable-remote-sudoers", feature = "agent-approval"))]
 /// Get the credentials of the peer at the other side of the socket
-fn get_peer_credentials(stream: &UnixStream) -> io::Result<libc::ucred> {
+pub(crate) fn get_peer_credentials(stream: &UnixStream) -> io::Result<libc::ucred> {
     let mut ucred = libc::ucred {
         pid: 0,
         uid: 0,

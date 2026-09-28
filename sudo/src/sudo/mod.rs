@@ -13,6 +13,8 @@ pub(crate) use cli::SudoAction;
 use cli::SudoAction;
 use std::{path::PathBuf, time::Duration};
 
+#[cfg(feature = "agent-approval")]
+pub(crate) mod agent;
 mod cli;
 pub(crate) use cli::{SudoEditOptions, SudoListOptions, SudoRunOptions, SudoValidateOptions};
 mod edit;

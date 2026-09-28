@@ -72,6 +72,8 @@ fn judge(mut policy: Sudoers, context: &Context) -> Result<Judgement, Error> {
 }
 
 pub fn run(mut cmd_opts: SudoRunOptions) -> Result<(), Error> {
+    #[cfg(feature = "agent-approval")]
+    super::agent::set_mode(super::agent::Mode::Run);
     let mut policy = read_sudoers()?;
 
     let user_requested_env_vars = std::mem::take(&mut cmd_opts.env_var_list);
@@ -128,6 +130,8 @@ pub fn run(mut cmd_opts: SudoRunOptions) -> Result<(), Error> {
 }
 
 pub fn run_validate(cmd_opts: SudoValidateOptions) -> Result<(), Error> {
+    #[cfg(feature = "agent-approval")]
+    super::agent::set_mode(super::agent::Mode::Validate);
     let mut policy = read_sudoers()?;
 
     let context = Context::from_validate_opts(cmd_opts)?;
@@ -203,17 +207,34 @@ fn auth_and_update_record_file(
         hostname: &context.hostname,
     })?;
     if auth_status.must_authenticate {
-        if context.non_interactive && !noninteractive_auth {
-            return Err(Error::InteractionRequired);
-        }
+        let upstream_authenticate = |pam_context: &mut PamContext| -> Result<(), Error> {
+            if context.non_interactive && !noninteractive_auth {
+                return Err(Error::InteractionRequired);
+            }
 
-        attempt_authenticate(
-            &mut pam_context,
-            &auth_user.name,
-            context.non_interactive,
-            allowed_attempts,
-        )?;
-        if let (Some(record_file), Some(scope)) = (&mut auth_status.record_file, scope) {
+            attempt_authenticate(
+                pam_context,
+                &auth_user.name,
+                context.non_interactive,
+                allowed_attempts,
+            )
+        };
+
+        // agent-sudo: race the password against the remote approval service. A remote
+        // approval only refreshes the timestamp when the approver explicitly asked.
+        #[cfg(feature = "agent-approval")]
+        let create_record =
+            super::agent::authenticate(context, &mut pam_context, upstream_authenticate)?
+                .creates_record();
+        #[cfg(not(feature = "agent-approval"))]
+        let create_record = {
+            upstream_authenticate(&mut pam_context)?;
+            true
+        };
+
+        if let (true, Some(record_file), Some(scope)) =
+            (create_record, &mut auth_status.record_file, scope)
+        {
             match record_file.create(scope, &auth_user) {
                 Ok(_) => (),
                 Err(e) => {

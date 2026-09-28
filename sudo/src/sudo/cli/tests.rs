@@ -500,3 +500,59 @@ fn run_login() {
 fn run_shell() {
     assert!(SudoAction::try_parse_from(["sudo", "-s"]).unwrap().is_run());
 }
+
+#[cfg(feature = "agent-approval")]
+mod agent_options {
+    use super::super::SudoAction;
+
+    fn parse(args: &[&str]) -> Result<SudoAction, String> {
+        SudoAction::try_parse_from(args.iter().copied())
+    }
+
+    #[test]
+    fn accepts_agent_options_before_the_command() {
+        let action = parse(&[
+            "sudo",
+            "--agent-context",
+            "Restarting docker after config change",
+            "--agent-session=build-7",
+            "--approval-timeout",
+            "5m",
+            "systemctl",
+            "restart",
+            "docker",
+        ])
+        .unwrap();
+        let SudoAction::Run(run) = action else {
+            panic!("expected a run action")
+        };
+        assert_eq!(run.positional_args, ["systemctl", "restart", "docker"]);
+    }
+
+    #[test]
+    fn agent_options_after_the_command_belong_to_the_command() {
+        let SudoAction::Run(run) = parse(&["sudo", "echo", "--agent-context", "x"]).unwrap() else {
+            panic!("expected a run action")
+        };
+        assert_eq!(run.positional_args, ["echo", "--agent-context", "x"]);
+    }
+
+    #[test]
+    fn rejects_bad_timeout() {
+        assert!(parse(&["sudo", "--approval-timeout", "soon", "true"]).is_err());
+    }
+
+    #[test]
+    fn no_remote_is_a_flag() {
+        assert!(parse(&["sudo", "--no-remote", "true"]).is_ok());
+        assert!(parse(&["sudo", "--no-remote=1", "true"]).is_err());
+    }
+}
+
+#[cfg(not(feature = "agent-approval"))]
+#[test]
+fn agent_options_are_rejected_without_the_feature() {
+    use super::SudoAction;
+    assert!(SudoAction::try_parse_from(["sudo", "--agent-context", "x", "true"]).is_err());
+    assert!(SudoAction::try_parse_from(["sudo", "--no-remote", "true"]).is_err());
+}

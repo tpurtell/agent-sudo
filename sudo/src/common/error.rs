@@ -34,12 +34,17 @@ pub enum Error {
     StringValidation(String),
     #[cfg(feature = "apparmor")]
     AppArmor(String, std::io::Error),
+    /// agent-sudo: the remote approval path refused or could not decide.
+    #[cfg(feature = "agent-approval")]
+    Approval(String),
 }
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Error::Silent => Ok(()),
+            #[cfg(feature = "agent-approval")]
+            Error::Approval(message) => write!(f, "{message}"),
             Error::NotAllowed {
                 username,
                 command,

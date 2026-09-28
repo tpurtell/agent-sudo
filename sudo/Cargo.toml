@@ -35,6 +35,10 @@ gettext = []
 # whether to enable the unstable '@socket' feature for fetching a remote sudoers
 unstable-remote-sudoers = []
 
+# agent-sudo: race sudoers authentication against a remote approval service
+# reached through agent-sudo-hostd. Without this feature the binary is upstream sudo-rs.
+agent-approval = []
+
 # enable detailed logging (use for development only) to /tmp
 # this will compromise the security of sudo-rs somewhat
 dev = []

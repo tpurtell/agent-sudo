@@ -17,6 +17,8 @@ use sys::*;
 mod askpass;
 mod converse;
 mod error;
+#[cfg(feature = "agent-approval")]
+pub(crate) mod remote_wake;
 mod rpassword;
 mod securemem;
 

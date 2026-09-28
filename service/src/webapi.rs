@@ -719,7 +719,7 @@ async fn grants_list(State(state): State<Shared>, Authed(_s): Authed) -> ApiResu
         .map(|g| {
             let mut v = json!(g);
             v["active"] = json!(g.active(now));
-            v["summary"] = json!(engine::grant_summary(&state, g));
+            v["summary"] = json!(engine::grant_summary_with(&state, g, false));
             v
         })
         .collect();

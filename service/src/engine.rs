@@ -672,10 +672,33 @@ fn use_grant(state: &AppState, g: &GrantRow) -> anyhow::Result<()> {
 }
 
 pub fn grant_summary(state: &AppState, g: &GrantRow) -> String {
+    grant_summary_with(state, g, true)
+}
+
+pub fn grant_summary_with(state: &AppState, g: &GrantRow, with_remaining: bool) -> String {
     let remaining = g
         .expires_at
+        .filter(|_| with_remaining)
         .map(|e| format!(", {} left", human_duration((e - now_ms()) / 1000)))
         .unwrap_or_default();
+    if g.kind == "delegation"
+        && let Ok(spec) = serde_json::from_value::<DelegationSpec>(g.spec.clone())
+    {
+        let hosts = match &spec.hosts {
+            HostScope::Host { host_id } => host_name(state, host_id),
+            HostScope::Groups { groups } => groups.join(", "),
+            HostScope::All => "all hosts".into(),
+        };
+        let who = match &spec.requester {
+            Some(RequesterScope::Session { label, .. }) => label.clone(),
+            Some(RequesterScope::User { user }) => format!("user {user}"),
+            None => "any requester".into(),
+        };
+        return format!(
+            "{hosts} · {who} · risk ≤ {}{remaining}",
+            spec.limits.max_risk
+        );
+    }
     match serde_json::from_value::<GrantSpec>(g.spec.clone()) {
         Ok(spec) => format!(
             "{}{remaining}",

@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- `agent-sudo -n` no longer says "request expired without a decision" when no grant
+  or delegation matches; nothing was ever sent for a human to decide.
+
 ## 0.1.0 (2026-09-28)
 
 First release.

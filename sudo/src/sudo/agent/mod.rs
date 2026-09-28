@@ -283,7 +283,14 @@ pub(crate) fn authenticate(
         }
         Err(e) => return unavailable(pam, &mut password, e.to_string()),
     };
-    match decision(&cfg, &first) {
+    // For `-n`, "expired" only means no grant or delegation matched; the request was
+    // never shown to anyone, so there is nothing to report.
+    let first_decision = if nonblocking && first.verb == "expired" {
+        Some(Decision::Expired)
+    } else {
+        decision(&cfg, &first)
+    };
+    match first_decision {
         Some(Decision::Approved { refresh }) => {
             return Ok(Outcome::Remote {
                 refresh_timestamp: refresh,

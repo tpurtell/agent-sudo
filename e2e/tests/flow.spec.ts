@@ -163,6 +163,7 @@ test("sudo -n never blocks: no grant means an immediate failure", async () => {
   const r = await job.finish(10_000);
   expect(r.exit).not.toBe(0);
   expect(r.output).toMatch(/interactive authentication is required/);
+  expect(r.output).not.toContain("expired");
   const pending = (await api<any>(page, "GET", "/api/requests?view=pending")).json.items;
   expect(pending).toHaveLength(0);
 });

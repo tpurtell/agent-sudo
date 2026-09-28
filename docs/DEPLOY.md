@@ -14,30 +14,37 @@ The sidecar joins your tailnet and serves `https://<TS_HOSTNAME>.<tailnet>.ts.ne
 with an automatic Let's Encrypt certificate. Only tailnet devices can reach it.
 
 1. In the Tailscale admin console enable **MagicDNS** and **HTTPS certificates**.
-2. Choose the hostname (`TS_HOSTNAME`) now. It becomes part of the service's address,
+2. Declare a tag for the service in your tailnet policy file, so the device belongs to
+   the tag rather than a person and never expires:
+
+   ```json
+   "tagOwners": { "tag:agent-sudo": ["autogroup:admin"] }
+   ```
+
+3. Create an auth key under Settings → Keys → **Generate auth key**: not reusable, not
+   ephemeral, pre-approved, with the tag `tag:agent-sudo`. The key is only used for the
+   first start, so its expiry doesn't matter afterwards.
+4. Choose the hostname (`TS_HOSTNAME`) now. It becomes part of the service's address,
    and passkeys are tied to that address for good.
-3. Configure and start, leaving `TS_AUTHKEY` empty:
+5. Configure and start:
 
    ```sh
    cd deploy/service
-   cp .env.example .env                    # TS_HOSTNAME, public URL, model
+   cp .env.example .env                    # TS_AUTHKEY, TS_HOSTNAME, public URL, model
    cp service.example.toml service.toml
    docker compose --profile tailscale up -d
-   docker compose logs tailscale | grep login.tailscale.com
    ```
 
-4. Open the login link and approve the device. Then, in the admin console under
-   Machines, open the new device and choose **Disable key expiry**, or it will be
-   logged out after about 180 days.
-5. Open the setup link from the service log: `docker compose logs service | grep setup`.
+6. Open the setup link from the service log: `docker compose logs service | grep setup`.
 
 The device's identity is kept in the `tailscale` volume, so restarts and upgrades don't
-need the link again. Back that volume up with `data`, and never commit it anywhere.
+need the key again; you can remove it from `.env` once the device appears. Back that
+volume up with `data`, and never commit it anywhere.
 
-**Unattended alternative.** Set `TS_AUTHKEY` to an auth key from Settings → Keys
-(not reusable, not ephemeral, pre-approved). With a tag such as `tag:agent-sudo`
-(declared under `tagOwners` in your tailnet policy) the device belongs to the tag and
-never expires. The key is only needed for the first start.
+**Without an auth key.** Leave `TS_AUTHKEY` empty and the sidecar prints a login link
+(`docker compose logs tailscale | grep login.tailscale.com`). Approve it, then choose
+**Disable key expiry** for the device under Machines, or it is logged out after about
+180 days.
 
 ### Your own certificate (nginx)
 

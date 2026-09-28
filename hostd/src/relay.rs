@@ -256,17 +256,24 @@ impl Relay {
 
         let deadline =
             tokio::time::Instant::now() + Duration::from_secs(envelope.timeout_secs + 30);
-        let mut client_line = String::new();
+        // Read the client side in its own task: `read_line` is not cancellation-safe,
+        // and re-arming it on every long-poll round could lose a `cancel` line.
+        let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel::<String>();
+        tokio::spawn(async move {
+            let mut line = String::new();
+            let reason = match reader.read_line(&mut line).await {
+                Ok(0) | Err(_) => "client disconnected".to_string(),
+                Ok(_) => Line::parse(&line)
+                    .filter(|l| l.verb == "cancel")
+                    .and_then(|l| l.get_str("reason"))
+                    .unwrap_or_else(|| "cancelled".into()),
+            };
+            let _ = cancel_tx.send(reason);
+        });
         loop {
             tokio::select! {
-                read = reader.read_line(&mut client_line) => {
-                    let reason = match read {
-                        Ok(0) | Err(_) => "client disconnected".to_string(),
-                        Ok(_) => Line::parse(&client_line)
-                            .filter(|l| l.verb == "cancel")
-                            .and_then(|l| l.get_str("reason"))
-                            .unwrap_or_else(|| "cancelled".into()),
-                    };
+                reason = &mut cancel_rx => {
+                    let reason = reason.unwrap_or_else(|_| "client disconnected".into());
                     tracing::info!(%id, %reason, "request withdrawn by client");
                     if let Err(e) = self.client.cancel(&id, &reason).await {
                         tracing::warn!(%id, "cancel failed: {e:#}");

@@ -18,8 +18,8 @@ AmbientCapabilities=
 NoNewPrivileges=yes
 ProtectSystem=strict
 ReadWritePaths=/run/agent-sudo
-ProtectHome=yes
-PrivateTmp=yes
+# hostd must see the real /home and /tmp to judge the executable and path arguments.
+ProtectHome=read-only
 PrivateDevices=yes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes

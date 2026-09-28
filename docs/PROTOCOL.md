@@ -27,6 +27,7 @@ launch=direct            direct | shell (-s) | login (-i)
 command=/usr/bin/apt     resolved absolute path
 arg=install              repeated, in order
 arg=-y
+env=DEBIAN_FRONTEND=noninteractive   repeated: VAR=value and --preserve-env overrides
 cwd=/home/tj/project
 tty=/dev/pts/3
 context=Installing%20headers   untrusted
@@ -48,8 +49,10 @@ treats a closed connection as a cancel.
 
 ## hostd ↔ service (HTTPS)
 
-JSON bodies are defined in `protocol/src/api.rs`. Every request except enrollment
-carries:
+JSON bodies are defined in `protocol/src/api.rs`. The request envelope adds facts hostd
+gathers as root: `executable` (canonical path, owner, mode, whether the requester can
+modify it) and `paths` (each path-like argument resolved against the working directory,
+flagging requester-owned symlinks). Every request except enrollment carries:
 
 ```
 x-agent-sudo-host:      <host id>

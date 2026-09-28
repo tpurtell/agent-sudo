@@ -92,6 +92,9 @@ export interface RequestView {
   interactive: boolean;
   nonblocking: boolean;
   lossy: boolean;
+  env: string[];
+  executable: { real_path: string; owner_uid: number; mode: number; writable_by_requester: boolean } | null;
+  paths: { index: number; given: string; resolved: string; user_symlink: boolean }[];
   session: {
     label: string;
     agent: string | null;

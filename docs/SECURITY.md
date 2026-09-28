@@ -31,8 +31,17 @@ agent (untrusted) ──exec──> agent-sudo (setuid root, sudo-rs fork)
    never authorization. Denied or NOPASSWD commands never reach the service.
 2. **Only the setuid binary executes**, using the command it resolved itself before
    asking. Nothing from the service is executed or interpolated.
-3. **Decision inputs come from root.** uid, target, resolved executable, argv, cwd, tty,
-   and the session fingerprint are established by the binary or by hostd from `/proc`.
+3. **Decision inputs come from root.** uid, target, resolved executable, argv,
+   environment overrides, cwd, tty, and the session fingerprint are established by the
+   binary or by hostd from `/proc`. hostd also `stat`s the executable (canonical path,
+   owner, whether the requester could modify or replace it) and resolves path-like
+   arguments against the working directory. Environment overrides other than a short
+   benign list, executables the requester can modify, and setuid/setcap changes are
+   classified as root shells. Requests whose target could change after approval (a
+   path through a requester-owned symlink, an executable hostd could not verify, or
+   non-UTF-8 arguments) can be approved once but never become grants or delegations.
+   Grants bind the executable, arguments, target user and group, launch type, working
+   directory, and environment.
    `--agent-context`, `--agent-session` and environment values are labelled untrusted
    in the UI and in the model prompt. The binary never reads files for agent text
    (there is no `--agent-context-file`; root could be tricked into reading
@@ -57,7 +66,12 @@ agent (untrusted) ──exec──> agent-sudo (setuid root, sudo-rs fork)
 8. **Browser actions are CSRF-safe and versioned.** Opaque server-side session tokens in
    `__Host-` cookies (`HttpOnly; Secure; SameSite=Strict`), a per-session CSRF header,
    and an Origin check on every state change. Decisions carry the request version;
-   stale or duplicate decisions get 409. Opening a notification never approves.
+   stale or duplicate decisions get 409, and the state change and any new grant or
+   delegation commit in one transaction. Grant and delegation uses are claimed with a
+   single conditional update, and a delegation is re-checked after the model returns.
+   Enrollment tokens are consumed atomically. Opening a notification never approves.
+   Registering a passkey does not count as step-up; push subscriptions must point at
+   a known browser push service.
 9. **Fail closed without a terminal.** If hostd or the service is unreachable, a
    headless request fails. With a terminal, the normal password prompt remains
    (configurable to deny).
@@ -85,6 +99,15 @@ Once a user has a passkey, password sign-in is refused unless
 on the server, which prints a one-time invitation link.
 
 ## Known limits
+
+- Paths are resolved when the request is made. A requester who controls a directory
+  on the path (rather than a symlink) can still swap files between approval and
+  execution; approve writes into user-owned locations with that in mind.
+- In a terminal, a remote approval interrupts an in-progress PAM conversation, which
+  PAM records as one failed attempt. With `pam_faillock` configured aggressively this
+  counts toward lockout.
+- Classification by name cannot recognise every program that runs arbitrary code;
+  the model assessment and your own classes cover the rest.
 
 - The session fingerprint separates agent sessions, not users. Two agents running as
   the same uid on one host can use each other's session-scoped grants.

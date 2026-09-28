@@ -77,6 +77,9 @@ pub fn run(mut cmd_opts: SudoRunOptions) -> Result<(), Error> {
     let mut policy = read_sudoers()?;
 
     let user_requested_env_vars = std::mem::take(&mut cmd_opts.env_var_list);
+    // agent-sudo: environment overrides change what runs, so the approver must see them.
+    #[cfg(feature = "agent-approval")]
+    super::agent::set_env_overrides(&user_requested_env_vars);
 
     let context = Context::from_run_opts(cmd_opts, &mut policy)?;
 

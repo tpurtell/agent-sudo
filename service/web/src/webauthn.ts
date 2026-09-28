@@ -104,7 +104,7 @@ export async function registerPasskey(name: string): Promise<void> {
   const cred = (await navigator.credentials.create(creationOptions(start.options))) as PublicKeyCredential | null;
   if (!cred) throw new Error("No passkey was created.");
   await api("POST", "/api/passkeys/register/finish", { ceremony: start.ceremony, credential: attestationJson(cred) });
-  markStrong();
+  // Registration is not an assertion, so it doesn't unlock step-up actions.
 }
 
 export async function signInWithPasskey(name?: string, conditional?: AbortSignal): Promise<void> {

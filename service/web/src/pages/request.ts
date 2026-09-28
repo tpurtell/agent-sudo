@@ -24,6 +24,15 @@ type CommandScope = "once" | "exact" | "prefix" | "executable";
 
 const TTL_CHOICES = [10, 30, 60, 240, 480];
 
+/** Why a request can't become a standing approval, mirroring the service's rule. */
+function ungrantable(r: RequestView): string | null {
+  if (r.lossy) return "Some arguments aren't valid UTF-8, so this can only be approved once.";
+  const has = (k: string) => r.features.some((f) => f.key === k);
+  if (has("user_symlink")) return "A path goes through a symlink the requester controls, so this can only be approved once.";
+  if (has("unverified_executable")) return "The host couldn't verify the executable, so this can only be approved once.";
+  return null;
+}
+
 export async function requestPage(params: Record<string, string>): Promise<Mounted> {
   const el = h("div", {});
   let r: RequestView;
@@ -73,7 +82,7 @@ interface Draft {
 function initialDraft(r: RequestView): Draft {
   const a = r.assessment.assessment;
   const maxTtl = r.class.max_ttl_minutes;
-  const grantsAllowed = !r.class.require_each_time && maxTtl > 0 && !r.lossy && r.mode === "run";
+  const grantsAllowed = !r.class.require_each_time && maxTtl > 0 && ungrantable(r) === null && r.mode === "run";
   const sug = a?.suggestion;
   const command: CommandScope = grantsAllowed && sug && sug.decision === "approve" ? sug.command : "once";
   const ttl = Math.min(sug?.ttl_minutes || 30, maxTtl) || 30;
@@ -130,6 +139,31 @@ function build(r: RequestView, keep: Draft | null, save: (d: Draft) => void, rel
     h("dd", {}, `${r.target}`, h("span", { class: "faint" }, ` (uid ${r.target_uid}), requested by ${r.user}`)),
     r.cwd ? [h("dt", {}, "Directory"), h("dd", { class: "mono" }, r.cwd)] : null,
     r.chdir ? [h("dt", {}, "Changes to"), h("dd", { class: "mono" }, r.chdir)] : null,
+    r.env?.length ? [h("dt", {}, "Environment"), h("dd", { class: "mono" }, ...r.env.map((v) => h("div", {}, v)))] : null,
+    r.executable && (r.executable.real_path !== r.command || r.executable.writable_by_requester || r.executable.owner_uid !== 0)
+      ? [
+          h("dt", {}, "Executable"),
+          h(
+            "dd",
+            {},
+            h("span", { class: "mono" }, r.executable.real_path),
+            r.executable.writable_by_requester ? h("div", { class: "small", style: "color:var(--bad)" }, "The requester can modify this file") : null,
+            r.executable.owner_uid !== 0 ? h("div", { class: "small", style: "color:var(--bad)" }, `Owned by uid ${r.executable.owner_uid}, not root`) : null,
+          ),
+        ]
+      : null,
+    r.paths?.some((p) => p.resolved !== p.given)
+      ? [
+          h("dt", {}, "Paths"),
+          h(
+            "dd",
+            { class: "stack tight" },
+            ...r.paths
+              .filter((p) => p.resolved !== p.given)
+              .map((p) => h("div", { class: "small" }, h("span", { class: "mono" }, p.given), " → ", h("span", { class: "mono" }, p.resolved), p.user_symlink ? h("span", { class: "chip warn", style: "margin-left:6px" }, "your symlink") : null)),
+          ),
+        ]
+      : null,
     h("dt", {}, "Terminal"),
     h("dd", {}, r.interactive ? `Yes (${r.tty ?? "tty"}), password also accepted` : "No, waiting only for you"),
     h("dt", {}, "Session"),
@@ -278,7 +312,8 @@ function historyCard(r: RequestView): HTMLElement | null {
 function decisionBuilder(r: RequestView, d: Draft, save: (d: Draft) => void, reload: () => Promise<void>): HTMLElement[] {
   const s = currentSession();
   const maxTtl = r.class.max_ttl_minutes;
-  const grantsAllowed = !r.class.require_each_time && maxTtl > 0 && !r.lossy && r.mode === "run" && !!r.command;
+  const why = ungrantable(r);
+  const grantsAllowed = !r.class.require_each_time && maxTtl > 0 && why === null && r.mode === "run" && !!r.command;
   const hasGroup = (r.host?.groups.length ?? 0) > 0;
   const suggested = r.assessment.assessment?.suggestion;
   const canDelegate = !!s.advisor && s.automation.enabled && r.class.delegable && !r.lossy;
@@ -429,7 +464,7 @@ function decisionBuilder(r: RequestView, d: Draft, save: (d: Draft) => void, rel
     h(
       "div",
       { class: "card pad scope" },
-      field("Remember this approval", commandSeg, grantsAllowed ? undefined : r.class.require_each_time ? `${r.class.title} always needs a fresh decision.` : "This request can only be approved once."),
+      field("Remember this approval", commandSeg, grantsAllowed ? undefined : r.class.require_each_time ? `${r.class.title} always needs a fresh decision.` : (why ?? "This request can only be approved once.")),
       grantFields,
       delegateRow,
       delegateBox,

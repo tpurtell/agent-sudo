@@ -98,6 +98,8 @@ impl Default for AutomationConfig {
                 "credential_access".into(),
                 "validate".into(),
                 "lossy".into(),
+                "user_symlink".into(),
+                "unverified_executable".into(),
             ],
             default_limits: crate::grants::DelegationLimits::default(),
         }
@@ -527,10 +529,41 @@ fn name_in(cmd: &str, list: &[&str]) -> bool {
 pub fn features(env: &RequestEnvelope) -> Features {
     let mut f = Features::default();
     let cmd = env.command.clone().unwrap_or_default();
-    let all_text: Vec<&str> = std::iter::once(cmd.as_str())
-        .chain(env.argv.iter().map(String::as_str))
-        .chain(env.chdir.iter().map(String::as_str))
+    // Classify by the name as given and by the canonical target hostd resolved, so a
+    // symlink or alternative name does not hide what actually runs.
+    let real = env
+        .executable
+        .as_ref()
+        .map(|e| e.real_path.clone())
+        .unwrap_or_default();
+    let names: Vec<&str> = [cmd.as_str(), real.as_str()]
+        .into_iter()
+        .filter(|n| !n.is_empty())
         .collect();
+    let is = |list: &[&str]| names.iter().any(|n| name_in(n, list));
+    let named = |n: &str| names.iter().any(|c| basename(c) == n);
+    // Search sensitive paths in every spelling: as given, lexically normalised, and as
+    // resolved by hostd (symlinks followed, relative paths anchored at the cwd).
+    let base = env
+        .chdir
+        .clone()
+        .or_else(|| env.cwd.clone())
+        .unwrap_or_else(|| "/".into());
+    let mut owned: Vec<String> = names.iter().map(|s| s.to_string()).collect();
+    owned.extend(env.argv.iter().cloned());
+    owned.extend(env.chdir.iter().cloned());
+    for arg in &env.argv {
+        let value = arg
+            .split_once('=')
+            .filter(|(k, _)| k.starts_with('-'))
+            .map(|(_, v)| v)
+            .unwrap_or(arg);
+        if value.contains('/') {
+            owned.push(normalize_path(&base, value));
+        }
+    }
+    owned.extend(env.paths.iter().map(|p| p.resolved.clone()));
+    let all_text: Vec<&str> = owned.iter().map(String::as_str).collect();
     let mentions = |needle: &str| all_text.iter().any(|a| a.contains(needle));
 
     match env.mode {
@@ -558,16 +591,16 @@ pub fn features(env: &RequestEnvelope) -> Features {
         f.add("root_shell", "danger", "Opens an interactive root shell");
     }
     if !cmd.is_empty() {
-        if name_in(&cmd, SHELLS) || name_in(&cmd, INTERPRETERS) {
+        if is(SHELLS) || is(INTERPRETERS) {
             f.add(
                 "root_shell",
                 "danger",
                 "Runs a shell or interpreter: arbitrary code as root",
             );
-        } else if name_in(&cmd, EDITORS_WITH_ESCAPES) {
+        } else if is(EDITORS_WITH_ESCAPES) {
             f.add("root_shell", "danger", "Editor or pager with shell escapes");
-        } else if name_in(&cmd, EXEC_WRAPPERS) {
-            let execs = basename(&cmd) != "find"
+        } else if is(EXEC_WRAPPERS) {
+            let execs = !named("find")
                 || env
                     .argv
                     .iter()
@@ -580,27 +613,27 @@ pub fn features(env: &RequestEnvelope) -> Features {
                 );
             }
         }
-        if name_in(&cmd, CONTAINERS) {
+        if is(CONTAINERS) {
             f.add(
                 "root_shell",
                 "danger",
                 "Container runtimes are root-equivalent",
             );
         }
-        if name_in(&cmd, PACKAGE_MANAGERS) {
+        if is(PACKAGE_MANAGERS) {
             f.add(
                 "package_manager",
                 "warn",
                 "Installs or changes system packages",
             );
         }
-        if name_in(&cmd, SERVICE_CONTROL) {
+        if is(SERVICE_CONTROL) {
             f.add("service_control", "warn", "Controls system services");
         }
-        if name_in(&cmd, DESTRUCTIVE) {
+        if is(DESTRUCTIVE) {
             f.add("destructive", "danger", "Can destroy data or disks");
         }
-        if basename(&cmd) == "rm"
+        if named("rm")
             && env.argv.iter().any(|a| {
                 a.starts_with('-') && !a.starts_with("--") && (a.contains('r') || a.contains('R'))
                     || a == "--recursive"
@@ -608,22 +641,22 @@ pub fn features(env: &RequestEnvelope) -> Features {
         {
             f.add("destructive", "danger", "Recursive delete");
         }
-        if name_in(&cmd, NETWORK) {
+        if is(NETWORK) {
             f.add(
                 "network_security",
                 "warn",
                 "Changes network or firewall configuration",
             );
         }
-        if name_in(&cmd, KERNEL) {
+        if is(KERNEL) {
             f.add(
                 "kernel",
                 "warn",
                 "Kernel modules, boot or kernel parameters",
             );
         }
-        if name_in(&cmd, AVAILABILITY)
-            || (basename(&cmd) == "systemctl"
+        if is(AVAILABILITY)
+            || (named("systemctl")
                 && env.argv.first().is_some_and(|a| {
                     matches!(
                         a.as_str(),
@@ -645,7 +678,7 @@ pub fn features(env: &RequestEnvelope) -> Features {
                 "Stops, restarts or signals processes or the machine",
             );
         }
-        if name_in(&cmd, ACCOUNTS) {
+        if is(ACCOUNTS) {
             f.add(
                 "credential_access",
                 "danger",
@@ -653,33 +686,63 @@ pub fn features(env: &RequestEnvelope) -> Features {
             );
         }
         // Setting setuid/setgid bits or file capabilities creates a permanent root path.
-        let sets_suid = matches!(basename(&cmd), "chmod" | "install")
+        let sets_suid = (named("chmod") || named("install"))
             && env.argv.iter().any(|a| {
-                let a = a.trim_start_matches("--mode=");
-                (a.len() == 4
-                    && a.chars().all(|c| c.is_digit(8))
-                    && matches!(a.as_bytes()[0], b'2' | b'4' | b'6' | b'7'))
-                    || (a.contains('s')
-                        && (a.contains('+') || a.contains('='))
-                        && a.chars().all(|c| "ugoa+-=rwxXst,".contains(c)))
+                chmod_sets_special(a.trim_start_matches("--mode=").trim_start_matches("-m"))
             });
-        if sets_suid || matches!(basename(&cmd), "setcap") {
+        if sets_suid || named("setcap") {
             f.add(
                 "root_shell",
                 "danger",
                 "Sets setuid/setgid bits or file capabilities",
             );
         }
-        if name_in(&cmd, WRITERS) {
+        if is(WRITERS) {
             f.add("file_write", "info", "Writes or changes files");
         }
-        if name_in(&cmd, APPROVAL_COMMANDS) {
+        if is(APPROVAL_COMMANDS) {
             f.add(
                 "approval_system",
                 "danger",
                 "Touches sudo or agent-sudo configuration",
             );
         }
+    }
+    for var in &env.env {
+        let name = var.split('=').next().unwrap_or("");
+        if BENIGN_ENV.contains(&name) || name.starts_with("LC_") {
+            f.add(
+                "env_override",
+                "warn",
+                format!("Sets {name} for the command"),
+            );
+        } else {
+            f.add(
+                "root_shell",
+                "danger",
+                format!("Sets {name}, which can change what code runs as root"),
+            );
+        }
+    }
+    match &env.executable {
+        Some(exe) if exe.writable_by_requester || exe.owner_uid != 0 => f.add(
+            "root_shell",
+            "danger",
+            "The requester can modify this executable, so it can run anything",
+        ),
+        None if env.mode == Mode::Run && !cmd.is_empty() => f.add(
+            "unverified_executable",
+            "warn",
+            "The host could not verify who owns this executable",
+        ),
+        _ => {}
+    }
+    if env.paths.iter().any(|p| p.user_symlink) {
+        f.add(
+            "user_symlink",
+            "warn",
+            "A path goes through a symlink the requester controls; its target can change",
+        );
     }
     if APPROVAL_PATHS.iter().any(|p| mentions(p)) {
         f.add(
@@ -720,11 +783,76 @@ pub fn features(env: &RequestEnvelope) -> Features {
     f
 }
 
+/// Environment variables that don't change which code runs.
+const BENIGN_ENV: &[&str] = &[
+    "DEBIAN_FRONTEND",
+    "NEEDRESTART_MODE",
+    "NEEDRESTART_SUSPEND",
+    "APT_LISTCHANGES_FRONTEND",
+    "LANG",
+    "LANGUAGE",
+    "TZ",
+    "TERM",
+    "COLUMNS",
+    "LINES",
+    "NO_COLOR",
+    "CLICOLOR",
+    "FORCE_COLOR",
+    "SYSTEMD_COLORS",
+    "SYSTEMD_LOG_LEVEL",
+    "DEBCONF_NONINTERACTIVE_SEEN",
+];
+
+/// Does a chmod/install mode set setuid or setgid? Handles octal of any length
+/// (`4755`, `04755`) and symbolic clauses (`u+s`, `g=rxs`, `a+rwx,u+s`).
+pub fn chmod_sets_special(mode: &str) -> bool {
+    if !mode.is_empty() && mode.len() <= 6 && mode.chars().all(|c| c.is_digit(8)) {
+        return u32::from_str_radix(mode, 8).is_ok_and(|m| m & 0o6000 != 0);
+    }
+    if !mode.chars().all(|c| "ugoa+-=rwxXst,".contains(c)) {
+        return false;
+    }
+    let mut adding = false;
+    for c in mode.chars() {
+        match c {
+            '+' | '=' => adding = true,
+            '-' | ',' => adding = false,
+            's' if adding => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
+/// Lexically normalise `value` against `base`: collapse `.`, `..` and `//`.
+pub fn normalize_path(base: &str, value: &str) -> String {
+    let joined = if value.starts_with('/') {
+        value.to_string()
+    } else {
+        format!("{base}/{value}")
+    };
+    let mut parts: Vec<&str> = Vec::new();
+    for part in joined.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            p => parts.push(p),
+        }
+    }
+    format!("/{}", parts.join("/"))
+}
+
 /// Canonical key for "the same command": mode, target, command, and arguments.
 pub fn command_key(env: &RequestEnvelope) -> String {
     serde_json::json!([
         env.mode,
         env.target.uid,
+        env.target.gid,
+        env.launch,
+        env.chdir,
+        env.env,
         env.command.clone().unwrap_or_default(),
         env.argv,
     ])
@@ -797,6 +925,14 @@ pub mod tests {
             cwd: Some("/home/tj".into()),
             chdir: None,
             tty: None,
+            env: vec![],
+            executable: Some(agent_sudo_protocol::api::ExecutableFacts {
+                real_path: cmd.into(),
+                owner_uid: 0,
+                mode: 0o755,
+                writable_by_requester: false,
+            }),
+            paths: vec![],
             session: SessionInfo {
                 fingerprint: "b:1:2".into(),
                 label: "claude (pid 1)".into(),
@@ -845,6 +981,62 @@ pub mod tests {
             check("/usr/bin/find", &["/", "-exec", "sh", ";"]),
             "root-shell"
         );
+    }
+
+    #[test]
+    fn spelling_and_facts_cannot_hide_sensitive_targets() {
+        let p = PolicyConfig::default();
+        let classify = |e: &RequestEnvelope| p.classify(e, &features(e)).name;
+        assert_eq!(
+            classify(&env("/usr/bin/tee", &["/etc//sudoers.d/x"])),
+            "approval-system"
+        );
+        let mut e = env("/usr/bin/tee", &["../../etc/sudoers.d/x"]);
+        e.cwd = Some("/home/tj".into());
+        assert_eq!(classify(&e), "approval-system");
+        let mut e = env("/usr/bin/tee", &["notes.txt"]);
+        e.paths = vec![agent_sudo_protocol::api::PathFact {
+            index: 0,
+            given: "notes.txt".into(),
+            resolved: "/etc/shadow".into(),
+            user_symlink: true,
+        }];
+        assert_eq!(classify(&e), "credentials");
+        assert!(features(&e).has("user_symlink"));
+        // A renamed shell: the canonical target gives it away.
+        let mut e = env("/usr/local/bin/fixperms", &[]);
+        e.executable = Some(agent_sudo_protocol::api::ExecutableFacts {
+            real_path: "/usr/bin/bash".into(),
+            owner_uid: 0,
+            mode: 0o755,
+            writable_by_requester: false,
+        });
+        assert_eq!(classify(&e), "root-shell");
+        // Anything the requester can modify is arbitrary code.
+        let mut e = env("/home/tj/bin/tool", &[]);
+        e.executable = Some(agent_sudo_protocol::api::ExecutableFacts {
+            real_path: "/home/tj/bin/tool".into(),
+            owner_uid: 1000,
+            mode: 0o755,
+            writable_by_requester: true,
+        });
+        assert_eq!(classify(&e), "root-shell");
+    }
+
+    #[test]
+    fn environment_overrides() {
+        let mut e = env("/usr/bin/apt", &["install", "-y", "jq"]);
+        e.env = vec!["DEBIAN_FRONTEND=noninteractive".into()];
+        let f = features(&e);
+        assert!(f.has("env_override") && !f.has("root_shell"));
+        e.env = vec!["LD_PRELOAD=/tmp/x.so".into()];
+        assert_eq!(
+            PolicyConfig::default().classify(&e, &features(&e)).name,
+            "root-shell"
+        );
+        let mut other = e.clone();
+        other.env.clear();
+        assert_ne!(command_key(&e), command_key(&other));
     }
 
     #[test]

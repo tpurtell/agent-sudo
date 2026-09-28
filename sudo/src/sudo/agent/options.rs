@@ -47,6 +47,16 @@ impl Mode {
 
 static OPTIONS: OnceLock<AgentOptions> = OnceLock::new();
 static MODE: OnceLock<Mode> = OnceLock::new();
+static ENV_OVERRIDES: OnceLock<Vec<(String, String)>> = OnceLock::new();
+
+/// Environment variables requested on the command line (`VAR=value`, `--preserve-env`).
+pub(crate) fn set_env_overrides(vars: &[(String, String)]) {
+    let _ = ENV_OVERRIDES.set(vars.to_vec());
+}
+
+pub(crate) fn env_overrides() -> &'static [(String, String)] {
+    ENV_OVERRIDES.get().map(Vec::as_slice).unwrap_or(&[])
+}
 
 pub(crate) fn set_options(options: AgentOptions) {
     let _ = OPTIONS.set(options);

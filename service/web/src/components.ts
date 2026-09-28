@@ -6,9 +6,14 @@ import type { Assessment, Feature, RequestView, StoredAssessment } from "./types
 const PATHLIKE = /^(\/|~\/|\.\/)/;
 
 /** Render a command line with light syntax emphasis, terminal style. */
-export function commandBlock(r: Pick<RequestView, "display" | "command" | "argv" | "mode" | "launch" | "target">, opts: { compact?: boolean; clip?: boolean } = {}): HTMLElement {
+export function commandBlock(r: Pick<RequestView, "display" | "command" | "argv" | "mode" | "launch" | "target"> & { env?: string[] }, opts: { compact?: boolean; clip?: boolean } = {}): HTMLElement {
   const el = h("div", { class: ["cmd", opts.compact && "compact", opts.clip && "clip"] });
   el.appendChild(h("span", { class: "prompt" }, r.target === "root" ? "# " : `${r.target}$ `));
+  // Environment overrides change what runs; show them first and prominently.
+  for (const v of r.env ?? []) {
+    el.appendChild(h("span", { class: "envvar", title: "Environment override" }, v));
+    el.appendChild(document.createTextNode(" "));
+  }
   if (r.mode !== "run" || !r.command) {
     el.appendChild(h("span", { class: "exe" }, r.display));
     return el;

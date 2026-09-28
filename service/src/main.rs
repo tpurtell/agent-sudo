@@ -187,6 +187,9 @@ async fn advisor_test(state: Shared, command: String, context: Option<String>) -
         cwd: Some("/home/dev/project".into()),
         chdir: None,
         tty: None,
+        env: vec![],
+        executable: None,
+        paths: vec![],
         session: agent_sudo_protocol::api::SessionInfo {
             fingerprint: "test".into(),
             label: "claude (pid 1)".into(),

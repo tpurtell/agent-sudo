@@ -356,6 +356,9 @@ pub fn request_view(state: &AppState, row: &RequestRow, detail: bool) -> Value {
         "interactive": env.interactive,
         "nonblocking": env.nonblocking,
         "lossy": env.lossy,
+        "env": env.env,
+        "executable": env.executable,
+        "paths": env.paths,
         "session": {
             "label": env.session.label,
             "agent": env.session.agent,
@@ -528,11 +531,21 @@ pub async fn submit(
         row.state = RequestState::Approved;
         row.grant_id = Some(g.id.clone());
         row.decision = Some(d);
-        use_grant(state, &g)?;
-    } else if let Some((delegation, stored)) =
+    } else if let Some((delegation, mut stored)) =
         evaluate_delegations(state, &row, host, &facts, &class).await?
     {
-        let approved = stored.delegation_check.as_ref().is_some_and(|c| c.approved);
+        let mut approved = stored.delegation_check.as_ref().is_some_and(|c| c.approved);
+        // The model call took time: re-check the kill switch and claim a use atomically,
+        // so a pause, revoke, expiry or exhausted budget in the meantime still wins.
+        if approved && !(state.automation_enabled() && claim_use(state, &delegation)?) {
+            approved = false;
+            if let Some(check) = stored.delegation_check.as_mut() {
+                check.approved = false;
+                check
+                    .reasons
+                    .push("the delegation stopped while the model was deciding".into());
+            }
+        }
         row.assessment = stored;
         if approved {
             let mut d = automatic_decision(
@@ -545,7 +558,6 @@ pub async fn submit(
             row.state = RequestState::Approved;
             row.delegation_id = Some(delegation.id.clone());
             row.decision = Some(d);
-            use_grant(state, &delegation)?;
             auto_delegation = Some(delegation);
         }
     }
@@ -639,36 +651,46 @@ fn insert(state: &AppState, row: &RequestRow) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Find a matching grant and claim one use of it atomically.
 fn matching_grant(
     state: &AppState,
     row: &RequestRow,
     facts: &HostFacts,
     class: &ClassConfig,
 ) -> anyhow::Result<Option<GrantRow>> {
-    Ok(live_grants(state, "grant")?.into_iter().find(|g| {
-        serde_json::from_value::<GrantSpec>(g.spec.clone())
-            .is_ok_and(|spec| grants::grant_matches(&spec, &row.envelope, facts, class))
-    }))
+    for g in live_grants(state, "grant")? {
+        let matches = serde_json::from_value::<GrantSpec>(g.spec.clone()).is_ok_and(|spec| {
+            grants::grant_matches(&spec, &row.envelope, &row.features, facts, class)
+        });
+        if matches && claim_use(state, &g)? {
+            return Ok(Some(g));
+        }
+    }
+    Ok(None)
 }
 
-fn use_grant(state: &AppState, g: &GrantRow) -> anyhow::Result<()> {
+/// Count one use of a grant or delegation, but only if it is still live. Returns
+/// false when it was revoked, paused, expired or used up since it was read.
+fn claim_use(state: &AppState, g: &GrantRow) -> anyhow::Result<bool> {
     let now = now_ms();
     let db = state.db.lock();
-    db.execute(
-        "UPDATE grants SET uses = uses + 1, last_used_at = ?1 WHERE id = ?2",
+    let changed = db.execute(
+        "UPDATE grants SET uses = uses + 1, last_used_at = ?1
+         WHERE id = ?2 AND revoked_at IS NULL AND paused_at IS NULL
+           AND (expires_at IS NULL OR expires_at > ?1)
+           AND (max_uses IS NULL OR uses < max_uses)",
         params![now, g.id],
     )?;
-    if let Some(max) = g.max_uses
-        && g.uses + 1 >= max
-    {
+    if changed == 1 {
         db.execute(
-            "UPDATE grants SET paused_at = ?1, pause_reason = ?2 WHERE id = ?3 AND paused_at IS NULL",
-            params![now, format!("reached its limit of {max} approvals"), g.id],
+            "UPDATE grants SET paused_at = ?1, pause_reason = 'reached its approval limit'
+             WHERE id = ?2 AND paused_at IS NULL AND max_uses IS NOT NULL AND uses >= max_uses",
+            params![now, g.id],
         )?;
     }
     drop(db);
     state.emit(Event::Grants);
-    Ok(())
+    Ok(changed == 1)
 }
 
 pub fn grant_summary(state: &AppState, g: &GrantRow) -> String {
@@ -1053,6 +1075,9 @@ pub struct DelegateInput {
     pub max_risk: Option<u8>,
     #[serde(default)]
     pub notify: NotifyMode,
+    /// For delegations created outside a request with requester "user".
+    #[serde(default)]
+    pub unix_user: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1148,8 +1173,8 @@ pub fn decide(state: &Shared, session: &Session, id: &str, input: DecideInput) -
     }
 
     let now = now_ms();
-    let mut grant_id = None;
-    let mut delegation_id = None;
+    let mut grant_new: Option<(String, String, GrantSpec, u32)> = None;
+    let mut delegation_new: Option<PreparedDelegation> = None;
     let scope = input.scope.clone().unwrap_or(ScopeInput {
         command: "once".into(),
         prefix_len: None,
@@ -1167,9 +1192,9 @@ pub fn decide(state: &Shared, session: &Session, id: &str, input: DecideInput) -
                 class.title
             )));
         }
-        if env.lossy {
+        if !grants::grantable(env, &row.features) {
             return Err(ApiError::bad_request(
-                "Requests with non-UTF-8 arguments cannot become standing approvals.",
+                "This request can only be approved once: what it runs could change after approval.",
             ));
         }
         let ttl = scope.ttl_minutes.clamp(1, class.max_ttl_minutes);
@@ -1209,25 +1234,16 @@ pub fn decide(state: &Shared, session: &Session, id: &str, input: DecideInput) -
                 .ok_or_else(|| ApiError::bad_request("Grants need a session or user scope."))?,
             target_uid: env.target.uid,
             refresh_timestamp: false,
+            target_gid: Some(env.target.gid),
+            launch: env.launch,
+            chdir: env.chdir.clone(),
+            env: env.env.clone(),
         };
-        let gid = new_id("grt");
         let label = policy::display_command(env)
             .chars()
             .take(120)
             .collect::<String>();
-        state.db.lock().execute(
-            "INSERT INTO grants (id, kind, label, spec_json, created_by, created_from_request, created_at, expires_at)
-             VALUES (?1, 'grant', ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![gid, label, serde_json::to_string(&spec).map_err(anyhow::Error::from)?, session.user.name, row.id, now, now + ttl as i64 * 60_000],
-        )?;
-        audit::record(
-            &state.db,
-            &session.user.name,
-            "grant.created",
-            Some(&gid),
-            json!({"spec": spec, "ttl_minutes": ttl, "request": row.id}),
-        );
-        grant_id = Some(gid);
+        grant_new = Some((new_id("grt"), label, spec, ttl));
     }
 
     if approve && let Some(del) = &input.delegate {
@@ -1237,9 +1253,10 @@ pub fn decide(state: &Shared, session: &Session, id: &str, input: DecideInput) -
         if state.advisor.is_none() {
             return Err(ApiError::bad_request("No decision model is configured."));
         }
-        let (did, _) = create_delegation(state, session, &host, Some(&row), del)?;
-        delegation_id = Some(did);
+        delegation_new = Some(prepare_delegation(state, session, &host, Some(&row), del)?);
     }
+    let grant_id = grant_new.as_ref().map(|g| g.0.clone());
+    let delegation_id = delegation_new.as_ref().map(|d| d.id.clone());
 
     let followed = row.assessment.assessment.as_ref().map(|a| {
         a.suggestion.decision == input.decision
@@ -1281,24 +1298,59 @@ pub fn decide(state: &Shared, session: &Session, id: &str, input: DecideInput) -
         followed_suggestion: followed,
         at: now,
     };
-    let changed = state.db.lock().execute(
-        "UPDATE requests SET state = ?1, version = version + 1, updated_at = ?2, decision_json = ?3, decided_at = ?2,
-            grant_id = COALESCE(?4, grant_id), delegation_id = COALESCE(?5, delegation_id)
-         WHERE id = ?6 AND state = 'pending' AND version = ?7",
-        params![
-            record.decision.state.as_str(),
-            now,
-            serde_json::to_string(&record).map_err(anyhow::Error::from)?,
-            grant_id,
-            delegation_id,
-            row.id,
-            input.version
-        ],
-    )?;
-    if changed == 0 {
-        return Err(ApiError::conflict(
-            "Someone else decided this request first.",
-        ));
+    // Claim the request and create any grant or delegation in one transaction, so a
+    // decision that lost a race leaves nothing behind.
+    {
+        let mut conn = state.db.lock();
+        let tx = conn.transaction()?;
+        let changed = tx.execute(
+            "UPDATE requests SET state = ?1, version = version + 1, updated_at = ?2, decision_json = ?3, decided_at = ?2,
+                grant_id = COALESCE(?4, grant_id), delegation_id = COALESCE(?5, delegation_id)
+             WHERE id = ?6 AND state = 'pending' AND version = ?7",
+            params![
+                record.decision.state.as_str(),
+                now,
+                serde_json::to_string(&record).map_err(anyhow::Error::from)?,
+                grant_id,
+                delegation_id,
+                row.id,
+                input.version
+            ],
+        )?;
+        if changed == 0 {
+            return Err(ApiError::conflict(
+                "Someone else decided this request first.",
+            ));
+        }
+        if let Some((gid, label, spec, ttl)) = &grant_new {
+            tx.execute(
+                "INSERT INTO grants (id, kind, label, spec_json, created_by, created_from_request, created_at, expires_at)
+                 VALUES (?1, 'grant', ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![gid, label, serde_json::to_string(spec).map_err(anyhow::Error::from)?, session.user.name, row.id, now, now + *ttl as i64 * 60_000],
+            )?;
+        }
+        if let Some(d) = &delegation_new {
+            insert_delegation(&tx, session, d)?;
+        }
+        tx.commit()?;
+    }
+    if let Some((gid, _, spec, ttl)) = &grant_new {
+        audit::record(
+            &state.db,
+            &session.user.name,
+            "grant.created",
+            Some(gid),
+            json!({"spec": spec, "ttl_minutes": ttl, "request": row.id}),
+        );
+    }
+    if let Some(d) = &delegation_new {
+        audit::record(
+            &state.db,
+            &session.user.name,
+            "delegation.created",
+            Some(&d.id),
+            json!({"spec": d.spec, "ttl_minutes": d.ttl, "device": session.device_label, "request": row.id}),
+        );
     }
     audit::record(
         &state.db,
@@ -1352,13 +1404,24 @@ fn scope_words(scope: &ScopeInput) -> String {
     format!("{what}, {hosts}, {}m", scope.ttl_minutes)
 }
 
-pub fn create_delegation(
+pub struct PreparedDelegation {
+    pub id: String,
+    pub label: String,
+    pub spec: DelegationSpec,
+    pub ttl: u32,
+    pub max_uses: u32,
+    pub from_request: Option<String>,
+    pub created_at: i64,
+}
+
+pub fn prepare_delegation(
     state: &AppState,
     session: &Session,
     host: &HostRow,
     from: Option<&RequestRow>,
     input: &DelegateInput,
-) -> ApiResult<(String, DelegationSpec)> {
+) -> ApiResult<PreparedDelegation> {
+    let _ = session;
     let intent = input.intent.trim();
     if intent.len() < 8 {
         return Err(ApiError::bad_request(
@@ -1370,18 +1433,33 @@ pub fn create_delegation(
     let requester = match (from, input.requester.as_str()) {
         (_, "any") => None,
         (Some(row), r) => requester_scope_for(r, &row.envelope)?,
-        (None, "user") => Some(RequesterScope::User {
-            user: session.user.name.clone(),
-        }),
-        (None, _) => None,
+        // Without a source request, "user" must name the unix user explicitly.
+        (None, "user") => match input
+            .unix_user
+            .as_deref()
+            .map(str::trim)
+            .filter(|u| !u.is_empty())
+        {
+            Some(user) => Some(RequesterScope::User {
+                user: user.to_string(),
+            }),
+            None => {
+                return Err(ApiError::bad_request(
+                    "Name the unix user this delegation covers.",
+                ));
+            }
+        },
+        (None, _) => {
+            return Err(ApiError::bad_request(
+                "A delegation that is not created from a request covers a unix user or any requester.",
+            ));
+        }
     };
     let mut limits = auto.default_limits.clone();
     if let Some(r) = input.max_risk {
-        limits.max_risk = r.min(60);
+        limits.max_risk = r;
     }
-    if limits.max_risk > 60 {
-        limits.max_risk = 60;
-    }
+    limits.max_risk = limits.max_risk.min(60);
     let spec = DelegationSpec {
         intent: intent.chars().take(600).collect(),
         hosts: host_scope_for(&input.hosts, &input.groups, host)?,
@@ -1393,8 +1471,6 @@ pub fn create_delegation(
         limits,
         notify: input.notify,
     };
-    let id = new_id("dlg");
-    let now = now_ms();
     let label = if intent.chars().count() <= 80 {
         intent.to_string()
     } else {
@@ -1402,20 +1478,57 @@ pub fn create_delegation(
         let cut = cut.rsplit_once(' ').map(|(head, _)| head).unwrap_or(&cut);
         format!("{}…", cut.trim_end_matches([',', '.', ';', ':']))
     };
-    state.db.lock().execute(
+    Ok(PreparedDelegation {
+        id: new_id("dlg"),
+        label,
+        spec,
+        ttl,
+        max_uses: auto.max_decisions,
+        from_request: from.map(|r| r.id.clone()),
+        created_at: now_ms(),
+    })
+}
+
+fn insert_delegation(
+    conn: &rusqlite::Connection,
+    session: &Session,
+    d: &PreparedDelegation,
+) -> ApiResult<()> {
+    conn.execute(
         "INSERT INTO grants (id, kind, label, spec_json, created_by, created_from_request, created_at, expires_at, max_uses)
          VALUES (?1, 'delegation', ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-        params![id, label, serde_json::to_string(&spec).map_err(anyhow::Error::from)?, session.user.name, from.map(|r| r.id.clone()), now, now + ttl as i64 * 60_000, auto.max_decisions as i64],
+        params![
+            d.id,
+            d.label,
+            serde_json::to_string(&d.spec).map_err(anyhow::Error::from)?,
+            session.user.name,
+            d.from_request,
+            d.created_at,
+            d.created_at + d.ttl as i64 * 60_000,
+            d.max_uses as i64
+        ],
     )?;
+    Ok(())
+}
+
+/// Create a delegation that is not tied to a request decision.
+pub fn create_delegation(
+    state: &AppState,
+    session: &Session,
+    host: &HostRow,
+    input: &DelegateInput,
+) -> ApiResult<(String, DelegationSpec)> {
+    let d = prepare_delegation(state, session, host, None, input)?;
+    insert_delegation(&state.db.lock(), session, &d)?;
     audit::record(
         &state.db,
         &session.user.name,
         "delegation.created",
-        Some(&id),
-        json!({"spec": spec, "ttl_minutes": ttl, "device": session.device_label}),
+        Some(&d.id),
+        json!({"spec": d.spec, "ttl_minutes": d.ttl, "device": session.device_label}),
     );
     state.emit(Event::Grants);
-    Ok((id, spec))
+    Ok((d.id, d.spec))
 }
 
 /// A human marks an automated approval as a mistake: pause the delegation.
@@ -1593,7 +1706,8 @@ pub fn spawn_background(state: Shared) {
         loop {
             tick.tick().await;
             send_digests(&s).await;
-            let cutoff = now_ms() - 120_000;
+            // Keep nonces longer than any timestamp could remain acceptable (skew both ways).
+            let cutoff = now_ms() - (2 * agent_sudo_protocol::signing::MAX_SKEW_SECS + 60) * 1000;
             s.nonces.lock().unwrap().retain(|_, at| *at > cutoff);
         }
     });

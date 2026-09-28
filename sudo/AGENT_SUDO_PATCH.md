@@ -34,7 +34,7 @@ cargo test --features agent-approval && cargo test
 | `src/common/error.rs` | `Error::Approval(String)` variant and its `Display` arm. |
 | `src/sudo/cli/mod.rs` | Agent options in `TAKES_ARGUMENT` and the option match; parked via `set_options`. |
 | `src/sudo/cli/tests.rs` | Parser tests for the agent options. |
-| `src/sudo/pipeline.rs` | `auth_and_update_record_file`: upstream authentication wrapped in a closure; with the feature, `agent::authenticate` decides whether to create the session record. `set_mode` in `run` and `run_validate`. |
+| `src/sudo/pipeline.rs` | `auth_and_update_record_file`: upstream authentication wrapped in a closure; with the feature, `agent::authenticate` decides whether to create the session record. `set_mode` in `run` and `run_validate`; `set_env_overrides` in `run` so environment overrides are part of the request. |
 | `src/sudo/pipeline/edit.rs`, `list.rs` | `set_mode` one-liners. |
 | `src/system/audit.rs` | `get_peer_credentials` also compiled (and `pub(crate)`) for `agent-approval`. |
 

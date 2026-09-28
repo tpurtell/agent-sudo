@@ -518,7 +518,8 @@ async fn passkey_register_finish(
     let info =
         passkeys::finish_registration(&state, &s.user, &input.ceremony, &input.credential)
             .map_err(|e| ApiError::bad_request(format!("Could not register the passkey: {e}")))?;
-    auth::mark_strong(&state, &s.id)?;
+    // Registering a key is not an assertion: it does not count as step-up.
+
     audit::record(
         &state.db,
         &s.user.name,
@@ -845,7 +846,7 @@ async fn delegation_create(
             }
         }
     };
-    let (id, spec) = engine::create_delegation(&state, &s, &host, None, &input.delegate)?;
+    let (id, spec) = engine::create_delegation(&state, &s, &host, &input.delegate)?;
     Ok(Json(json!({"id": id, "spec": spec})))
 }
 
@@ -1127,6 +1128,19 @@ async fn push_subscribe(
         .map_err(|_| ApiError::bad_request("Invalid push endpoint."))?;
     if url.scheme() != "https" {
         return Err(ApiError::bad_request("Push endpoints must be https."));
+    }
+    // Only real browser push services: approver subscriptions receive every command.
+    let host = url.host_str().unwrap_or("");
+    if !state.cfg.push.allowed_hosts.iter().any(|allowed| {
+        allowed
+            .strip_prefix("*.")
+            .map_or(host == allowed, |suffix| {
+                host.ends_with(&format!(".{suffix}"))
+            })
+    }) {
+        return Err(ApiError::bad_request(format!(
+            "{host} is not a recognised push service."
+        )));
     }
     // Validate the keys now rather than failing silently at send time.
     push::encrypt(b"{}", &input.keys.p256dh, &input.keys.auth)

@@ -25,6 +25,8 @@ pub struct LocalRequest {
     pub tty: Option<String>,
     pub context: Option<String>,
     pub session: Option<String>,
+    /// Environment overrides from the command line, as `NAME=value`.
+    pub env: Vec<Vec<u8>>,
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -82,6 +84,7 @@ impl LocalRequest {
                 "tty" => req.tty = Some(text(&value)),
                 "context" => req.context = Some(text(&value)),
                 "session" => req.session = Some(text(&value)),
+                "env" => req.env.push(value),
                 // Forward compatibility: newer binaries may send more fields.
                 _ => {}
             }

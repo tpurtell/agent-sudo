@@ -25,7 +25,7 @@ pub(crate) mod wire;
 
 use client::Connection;
 use config::{ClientConfig, Unavailable};
-pub(crate) use options::{AgentOptions, Mode, set_mode, set_options};
+pub(crate) use options::{AgentOptions, Mode, set_env_overrides, set_mode, set_options};
 use wire::{Line, RequestBlock};
 
 /// How the request ended up authenticated.
@@ -150,6 +150,9 @@ fn build_request(
     }
     for arg in &context.command.arguments {
         req.field("arg", arg.as_bytes());
+    }
+    for (name, value) in options::env_overrides() {
+        req.field("env", format!("{name}={value}"));
     }
     if let Some(chdir) = &context.chdir {
         req.field("chdir", chdir.as_os_str().as_bytes());

@@ -61,6 +61,23 @@ pub struct GrantSpec {
     pub target_uid: u32,
     #[serde(default)]
     pub refresh_timestamp: bool,
+    /// The invocation details a grant is bound to, beyond the command line.
+    #[serde(default)]
+    pub target_gid: Option<u32>,
+    #[serde(default)]
+    pub launch: agent_sudo_protocol::api::Launch,
+    #[serde(default)]
+    pub chdir: Option<String>,
+    #[serde(default)]
+    pub env: Vec<String>,
+}
+
+/// Features whose presence means the approved thing could differ from what runs
+/// later: such requests never become or match standing grants.
+pub const UNGRANTABLE_FEATURES: &[&str] = &["user_symlink", "unverified_executable", "lossy"];
+
+pub fn grantable(env: &RequestEnvelope, features: &Features) -> bool {
+    !env.lossy && !UNGRANTABLE_FEATURES.iter().any(|f| features.has(f))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -182,13 +199,18 @@ pub fn command_in_scope(scope: &CommandScope, env: &RequestEnvelope) -> bool {
 pub fn grant_matches(
     spec: &GrantSpec,
     env: &RequestEnvelope,
+    features: &Features,
     host: &HostFacts,
     class: &ClassConfig,
 ) -> bool {
-    !env.lossy
+    grantable(env, features)
         && !class.require_each_time
         && !class.always_deny
         && spec.target_uid == env.target.uid
+        && spec.target_gid == Some(env.target.gid)
+        && spec.launch == env.launch
+        && spec.chdir == env.chdir
+        && spec.env == env.env
         && host_in_scope(&spec.hosts, host)
         && requester_in_scope(&spec.requester, env)
         && command_in_scope(&spec.command, env)
@@ -247,15 +269,19 @@ pub fn delegation_verdict(
         ));
     }
     for (dim, ceiling) in &spec.limits.max_dimensions {
-        if let Some(p) = assessment.dimensions.get(dim)
-            && p > ceiling
-        {
-            reasons.push(format!(
+        match assessment.dimensions.get(dim) {
+            Some(p) if p > ceiling => reasons.push(format!(
                 "{} {:.0}% is above {:.0}%",
                 dim.replace('_', " "),
                 p * 100.0,
                 ceiling * 100.0
-            ));
+            )),
+            Some(_) => {}
+            // A missing judgement can't pass a ceiling.
+            None => reasons.push(format!(
+                "the model gave no {} judgement",
+                dim.replace('_', " ")
+            )),
         }
     }
     match assessment.relevance {
@@ -319,6 +345,10 @@ mod tests {
             requester: RequesterScope::User { user: "tj".into() },
             target_uid: 0,
             refresh_timestamp: false,
+            target_gid: Some(0),
+            launch: Default::default(),
+            chdir: None,
+            env: vec![],
         }
     }
 
@@ -342,30 +372,35 @@ mod tests {
                 &["restart", "nvidia-persistenced"]
             ),
             &e,
+            &features(&e),
             &host,
             &c
         ));
         assert!(!grant_matches(
             &spec(CommandMatch::Exact, "/usr/bin/systemctl", &["restart"]),
             &e,
+            &features(&e),
             &host,
             &c
         ));
         assert!(grant_matches(
             &spec(CommandMatch::Prefix, "/usr/bin/systemctl", &["restart"]),
             &e,
+            &features(&e),
             &host,
             &c
         ));
         assert!(grant_matches(
             &spec(CommandMatch::Executable, "/usr/bin/systemctl", &[]),
             &e,
+            &features(&e),
             &host,
             &c
         ));
         assert!(!grant_matches(
             &spec(CommandMatch::Executable, "/usr/bin/apt", &[]),
             &e,
+            &features(&e),
             &host,
             &c
         ));
@@ -376,6 +411,7 @@ mod tests {
         assert!(!grant_matches(
             &spec(CommandMatch::Executable, "/usr/bin/systemctl", &[]),
             &e,
+            &features(&e),
             &other,
             &c
         ));
@@ -392,6 +428,7 @@ mod tests {
         assert!(!grant_matches(
             &spec(CommandMatch::Executable, "/usr/bin/bash", &[]),
             &e,
+            &features(&e),
             &host,
             &class_of(&e)
         ));
@@ -400,6 +437,7 @@ mod tests {
         assert!(!grant_matches(
             &spec(CommandMatch::Exact, "/usr/bin/apt", &["update"]),
             &e,
+            &features(&e),
             &host,
             &class_of(&e)
         ));
@@ -420,12 +458,12 @@ mod tests {
             fingerprint: "b:1:2".into(),
             label: "x".into(),
         };
-        assert!(grant_matches(&s, &e, &host, &class_of(&e)));
+        assert!(grant_matches(&s, &e, &features(&e), &host, &class_of(&e)));
         s.requester = RequesterScope::Session {
             fingerprint: "b:9:9".into(),
             label: "x".into(),
         };
-        assert!(!grant_matches(&s, &e, &host, &class_of(&e)));
+        assert!(!grant_matches(&s, &e, &features(&e), &host, &class_of(&e)));
     }
 
     fn assessment(risk: u8, decision: &str) -> Assessment {
@@ -433,6 +471,9 @@ mod tests {
         a.risk = risk;
         a.confidence = 0.9;
         a.relevance = Some(0.9);
+        for (k, _) in crate::advisor::DIMENSIONS {
+            a.dimensions.insert(k.to_string(), 0.05);
+        }
         a.suggestion = Suggestion {
             decision: decision.into(),
             ..Suggestion::default()

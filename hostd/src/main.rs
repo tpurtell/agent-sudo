@@ -13,6 +13,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 
 mod config;
+mod facts;
 mod procinfo;
 mod relay;
 mod service;

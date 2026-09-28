@@ -66,6 +66,8 @@ pub struct PushConfig {
     pub enabled: bool,
     /// VAPID subject, a mailto: or https: URL identifying the operator.
     pub subject: String,
+    /// Push service hosts subscriptions may use (`*.` matches subdomains).
+    pub allowed_hosts: Vec<String>,
 }
 
 impl Default for PushConfig {
@@ -73,6 +75,15 @@ impl Default for PushConfig {
         Self {
             enabled: true,
             subject: "mailto:admin@localhost".into(),
+            allowed_hosts: [
+                "fcm.googleapis.com",
+                "*.push.services.mozilla.com",
+                "web.push.apple.com",
+                "*.push.apple.com",
+                "*.notify.windows.com",
+            ]
+            .map(String::from)
+            .to_vec(),
         }
     }
 }

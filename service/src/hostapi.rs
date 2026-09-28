@@ -137,7 +137,18 @@ async fn enroll(
         .unwrap_or_else(|| req.hostname.split('.').next().unwrap_or("host").to_string());
     let host_id = new_id("hst");
     let name = {
-        let db = state.db.lock();
+        let mut conn = state.db.lock();
+        let db = conn.transaction()?;
+        // Consume the token first; exactly one enrollment may win it.
+        let claimed = db.execute(
+            "UPDATE enrollment_tokens SET used_at = ?1, used_by_host = ?2 WHERE id = ?3 AND used_at IS NULL",
+            params![now, host_id, token_id],
+        )?;
+        if claimed != 1 {
+            return Err(ApiError::unauthorized(
+                "enrollment token is invalid, used, or expired",
+            ));
+        }
         let mut name = base_name.clone();
         let mut n = 2;
         while db
@@ -153,10 +164,7 @@ async fn enroll(
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)",
             params![host_id, name, req.hostname, req.public_key, groups, req.hostd_version, created_by, now],
         )?;
-        db.execute(
-            "UPDATE enrollment_tokens SET used_at = ?1, used_by_host = ?2 WHERE id = ?3",
-            params![now, host_id, token_id],
-        )?;
+        db.commit()?;
         name
     };
     audit::record(

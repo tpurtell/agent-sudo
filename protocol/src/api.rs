@@ -77,6 +77,30 @@ pub struct Untrusted {
     pub session: Option<String>,
 }
 
+/// Facts about the executable, established by hostd with `stat` as root.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExecutableFacts {
+    /// Canonical path with symlinks resolved.
+    pub real_path: String,
+    pub owner_uid: u32,
+    pub mode: u32,
+    /// The requester could change the file or replace it (it or a parent directory
+    /// is writable by them). Such commands are treated as arbitrary code.
+    pub writable_by_requester: bool,
+}
+
+/// A path-like argument, resolved by hostd against the working directory.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PathFact {
+    pub index: usize,
+    pub given: String,
+    /// Canonical path (symlinks resolved; a missing final component is appended).
+    pub resolved: String,
+    /// The path passes through a symlink the requester owns, so its target can change
+    /// after approval.
+    pub user_symlink: bool,
+}
+
 /// The authoritative description of a privilege request, built by hostd.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RequestEnvelope {
@@ -100,6 +124,13 @@ pub struct RequestEnvelope {
     pub cwd: Option<String>,
     pub chdir: Option<String>,
     pub tty: Option<String>,
+    /// Environment overrides requested on the command line (`NAME=value`).
+    #[serde(default)]
+    pub env: Vec<String>,
+    #[serde(default)]
+    pub executable: Option<ExecutableFacts>,
+    #[serde(default)]
+    pub paths: Vec<PathFact>,
     pub session: SessionInfo,
     pub untrusted: Untrusted,
     pub timeout_secs: u64,

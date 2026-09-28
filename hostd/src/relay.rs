@@ -64,9 +64,21 @@ fn lossy(bytes: &[u8], lossy_flag: &mut bool) -> String {
 pub fn envelope_from(req: &LocalRequest, proc: &Proc, hostd_version: &str) -> RequestEnvelope {
     let mut is_lossy = false;
     let command = req.command.as_deref().map(|c| lossy(c, &mut is_lossy));
-    let argv = req.args.iter().map(|a| lossy(a, &mut is_lossy)).collect();
+    let argv: Vec<String> = req.args.iter().map(|a| lossy(a, &mut is_lossy)).collect();
     let cwd = req.cwd.as_deref().map(|c| lossy(c, &mut is_lossy));
     let chdir = req.chdir.as_deref().map(|c| lossy(c, &mut is_lossy));
+    let env: Vec<String> = req.env.iter().map(|e| lossy(e, &mut is_lossy)).collect();
+    let mut gids = proc.groups(req.pid);
+    gids.push(req.gid);
+    let who = crate::facts::Requester { uid: req.uid, gids };
+    let executable = command
+        .as_deref()
+        .and_then(|c| crate::facts::executable(c, &who));
+    let base = chdir
+        .as_deref()
+        .or(cwd.as_deref())
+        .map(std::path::Path::new);
+    let paths = crate::facts::paths(&argv, base, &who);
     RequestEnvelope {
         client_request_id: ulid::Ulid::new().to_string(),
         mode: Mode::parse(&req.mode).unwrap_or(Mode::Run),
@@ -95,6 +107,9 @@ pub fn envelope_from(req: &LocalRequest, proc: &Proc, hostd_version: &str) -> Re
         cwd,
         chdir,
         tty: req.tty.clone(),
+        env,
+        executable,
+        paths,
         session: proc.session_of(req.pid),
         untrusted: Untrusted {
             context: req.context.clone(),

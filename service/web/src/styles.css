@@ -336,6 +336,7 @@ input[type="range"] { width: 100%; accent-color: var(--brand); }
 .cmd .path { color: var(--term-path); }
 .cmd .flag { color: var(--term-flag); }
 .cmd .dim { color: var(--term-dim); }
+.cmd .envvar { color: #ff9f7a; font-weight: 600; }
 .cmd.compact { padding: 9px 12px; font-size: 13.5px; }
 .cmd.clip { max-height: 5.2em; overflow: hidden; -webkit-mask-image: linear-gradient(#000 70%, transparent); mask-image: linear-gradient(#000 70%, transparent); }
 

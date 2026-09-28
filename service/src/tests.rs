@@ -434,10 +434,20 @@ async fn policy_blocks_grants_for_root_shells_and_requires_step_up() {
 
 /// A tiny OpenAI-compatible server that returns a canned assessment.
 async fn mock_model(risk: u8, decision: &'static str, relevance: f32) -> String {
+    mock_model_slow(risk, decision, relevance, 0).await
+}
+
+async fn mock_model_slow(
+    risk: u8,
+    decision: &'static str,
+    relevance: f32,
+    delay_ms: u64,
+) -> String {
     use axum::routing::post;
     let app = axum::Router::new().route(
         "/v1/chat/completions",
         post(move |axum::Json(body): axum::Json<Value>| async move {
+            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
             // The prompt must carry the untrusted context and the delegation intent.
             let state = body["messages"][1]["content"].as_str().unwrap_or_default().to_string();
             assert!(state.contains("requester_supplied_UNTRUSTED"));
@@ -597,4 +607,242 @@ async fn background_assessment_is_stored() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     panic!("assessment never arrived");
+}
+
+#[tokio::test]
+async fn environment_overrides_are_visible_and_bind_grants() {
+    let h = Harness::new("").await;
+    // A code-loading variable makes any command a root shell.
+    let (_, sub) = h
+        .submit("/usr/bin/apt", &["update"], |e| {
+            e.env = vec!["LD_PRELOAD=/tmp/x.so".into()]
+        })
+        .await;
+    let (_, r) = h
+        .web(
+            "GET",
+            &format!("/api/requests/{}", sub["id"].as_str().unwrap()),
+            Value::Null,
+        )
+        .await;
+    assert_eq!(r["class"]["name"], "root-shell");
+    assert_eq!(r["env"][0], "LD_PRELOAD=/tmp/x.so");
+
+    // A benign variable is shown and becomes part of the grant.
+    let (_, sub) = h
+        .submit("/usr/bin/apt", &["install", "-y", "jq"], |e| {
+            e.env = vec!["DEBIAN_FRONTEND=noninteractive".into()]
+        })
+        .await;
+    let id = sub["id"].as_str().unwrap();
+    let (status, _) = h
+        .web("POST", &format!("/api/requests/{id}/decision"),
+             json!({"version": 1, "decision": "approve", "scope": {"command": "exact", "requester": "user", "ttl_minutes": 30}}))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, same) = h
+        .submit("/usr/bin/apt", &["install", "-y", "jq"], |e| {
+            e.env = vec!["DEBIAN_FRONTEND=noninteractive".into()]
+        })
+        .await;
+    assert_eq!(same["state"], "approved");
+    let (_, bare) = h
+        .submit("/usr/bin/apt", &["install", "-y", "jq"], |_| {})
+        .await;
+    assert_eq!(
+        bare["state"], "pending",
+        "a grant with env must not cover a different environment"
+    );
+    let (_, other) = h
+        .submit("/usr/bin/apt", &["install", "-y", "jq"], |e| {
+            e.env = vec!["APT_CONFIG=/tmp/evil".into()]
+        })
+        .await;
+    assert_eq!(other["state"], "pending");
+}
+
+#[tokio::test]
+async fn requests_whose_target_can_change_are_never_granted() {
+    let h = Harness::new("").await;
+    let (_, sub) = h
+        .submit("/usr/bin/cat", &["notes"], |e| {
+            e.paths = vec![PathFact {
+                index: 0,
+                given: "notes".into(),
+                resolved: "/var/log/syslog".into(),
+                user_symlink: true,
+            }];
+        })
+        .await;
+    let id = sub["id"].as_str().unwrap();
+    let (status, err) = h
+        .web("POST", &format!("/api/requests/{id}/decision"),
+             json!({"version": 1, "decision": "approve", "scope": {"command": "exact", "requester": "user", "ttl_minutes": 30}}))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{err}");
+    // Unverified executables (no facts from hostd) likewise.
+    let (_, sub) = h
+        .submit("/usr/bin/true", &[], |e| e.executable = None)
+        .await;
+    let (_, r) = h
+        .web(
+            "GET",
+            &format!("/api/requests/{}", sub["id"].as_str().unwrap()),
+            Value::Null,
+        )
+        .await;
+    assert!(r["features"].to_string().contains("unverified_executable"));
+}
+
+#[tokio::test]
+async fn a_losing_decision_creates_no_grant() {
+    let h = Harness::new("").await;
+    let (_, sub) = h.submit("/usr/bin/apt", &["update"], |_| {}).await;
+    let id = sub["id"].as_str().unwrap();
+    // The host withdraws first (the password won the race).
+    h.host(
+        "POST",
+        &format!("/api/v1/requests/{id}/cancel"),
+        Some(json!({"reason": "password"})),
+    )
+    .await;
+    let (status, _) = h
+        .web("POST", &format!("/api/requests/{id}/decision"),
+             json!({"version": 1, "decision": "approve", "scope": {"command": "executable", "requester": "user", "ttl_minutes": 30}}))
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let (_, grants) = h.web("GET", "/api/grants", Value::Null).await;
+    assert_eq!(grants["items"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn pausing_during_the_model_call_stops_the_approval() {
+    let url = mock_model_slow(10, "approve", 0.9, 600).await;
+    let h = Harness::new(&format!(
+        "[advisor]\nurl = \"{url}\"\nmodel = \"mock\"\nauto_assess = false\n"
+    ))
+    .await;
+    let (_, created) = h
+        .web("POST", "/api/delegations", json!({"intent": "Routine package maintenance", "ttl_minutes": 30, "hosts": "all", "requester": "any"}))
+        .await;
+    let did = created["id"].as_str().unwrap().to_string();
+    let submit = {
+        let app = h.app.clone();
+        let mut env = crate::policy::tests::env("/usr/bin/apt", &["install", "-y", "jq"]);
+        env.client_request_id = "slow".into();
+        let req = h.signed(
+            "POST",
+            "/api/v1/requests",
+            Some(serde_json::to_value(&env).unwrap()),
+        );
+        tokio::spawn(async move { call(&app, req).await })
+    };
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let (status, _) = h
+        .web("POST", &format!("/api/grants/{did}/pause"), json!({}))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, sub) = submit.await.unwrap();
+    assert_eq!(sub["state"], "pending", "{sub}");
+    let (_, r) = h
+        .web(
+            "GET",
+            &format!("/api/requests/{}", sub["id"].as_str().unwrap()),
+            Value::Null,
+        )
+        .await;
+    assert!(
+        r["assessment"]["delegation_check"]["reasons"]
+            .to_string()
+            .contains("stopped while the model was deciding")
+    );
+}
+
+#[tokio::test]
+async fn enrollment_tokens_are_single_use_under_concurrency() {
+    let h = Harness::new("").await;
+    let (_, token) = h
+        .web("POST", "/api/hosts/tokens", json!({"name": "twin"}))
+        .await;
+    let enroll = |key: String| {
+        let app = h.app.clone();
+        let token = token["token"].clone();
+        async move {
+            call(
+                &app,
+                Request::post("/api/v1/enroll")
+                    .header("content-type", "application/json")
+                    .body(Body::from(json!({"token": token, "hostname": "twin", "public_key": key, "hostd_version": "t"}).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .0
+        }
+    };
+    let k1 = signing::encode_public_key(&signing::generate_key().verifying_key());
+    let k2 = signing::encode_public_key(&signing::generate_key().verifying_key());
+    let (a, b) = tokio::join!(tokio::spawn(enroll(k1)), tokio::spawn(enroll(k2)));
+    let ok = [a.unwrap(), b.unwrap()]
+        .iter()
+        .filter(|s| **s == StatusCode::OK)
+        .count();
+    assert_eq!(ok, 1);
+}
+
+#[tokio::test]
+async fn push_subscriptions_must_use_a_real_push_service() {
+    let h = Harness::new("").await;
+    // A valid P-256 point and auth secret so only the endpoint is being judged.
+    let secret = p256::SecretKey::random(&mut p256::elliptic_curve::rand_core::OsRng);
+    use base64::Engine;
+    use p256::elliptic_curve::sec1::ToEncodedPoint;
+    let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    let keys = json!({"p256dh": b64.encode(secret.public_key().to_encoded_point(false).as_bytes()), "auth": b64.encode([7u8; 16])});
+    let (status, _) = h
+        .web(
+            "POST",
+            "/api/push/subscribe",
+            json!({"endpoint": "https://collector.evil.example/x", "keys": keys}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, _) = h
+        .web(
+            "POST",
+            "/api/push/subscribe",
+            json!({"endpoint": "https://fcm.googleapis.com/fcm/send/abc", "keys": keys}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = h
+        .web(
+            "POST",
+            "/api/push/subscribe",
+            json!({"endpoint": "https://wns2-par02p.notify.windows.com/w/?token=x", "keys": keys}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn standalone_delegations_cannot_silently_widen() {
+    let url = mock_model(10, "approve", 0.9).await;
+    let h = Harness::new(&format!("[advisor]\nurl = \"{url}\"\nmodel = \"mock\"\n")).await;
+    let (status, _) = h
+        .web("POST", "/api/delegations", json!({"intent": "Routine package maintenance", "ttl_minutes": 30, "hosts": "all", "requester": "session"}))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, _) = h
+        .web("POST", "/api/delegations", json!({"intent": "Routine package maintenance", "ttl_minutes": 30, "hosts": "all", "requester": "user"}))
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "user scope needs a unix user"
+    );
+    let (status, d) = h
+        .web("POST", "/api/delegations", json!({"intent": "Routine package maintenance", "ttl_minutes": 30, "hosts": "all", "requester": "user", "unix_user": "tj"}))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(d["spec"]["requester"]["user"], "tj");
 }

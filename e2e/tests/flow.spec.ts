@@ -298,6 +298,29 @@ test("root shells need a fresh passkey and can never become grants", async () =>
   await job.finish();
 });
 
+test("environment overrides and user-owned executables can't hide from the approver", async () => {
+  // sudoers ALL implies SETENV in sudo-rs: the override must be visible and classified.
+  const job = await run(["agent-sudo", "LD_PRELOAD=/nonexistent.so", "whoami"]);
+  let id = await requestByCode(page, await job.requestId());
+  await openRequest(id);
+  await expect(page.locator(".cmd .envvar")).toHaveText("LD_PRELOAD=/nonexistent.so");
+  await expect(page.locator(".facts")).toContainText("Unrestricted root execution");
+  await deny(id);
+  await job.finish();
+
+  // A script the agent can edit is arbitrary code, whatever it is called.
+  await (await run(["bash", "-c", "mkdir -p ~/bin && printf '#!/bin/sh\\nid -u\\n' > ~/bin/tidy && chmod 755 ~/bin/tidy"])).finish();
+  const tidy = await run(["agent-sudo", "/home/agent/bin/tidy"]);
+  id = await requestByCode(page, await tidy.requestId());
+  const r = await requestState(page, id);
+  expect(r.class.name).toBe("root-shell");
+  expect(r.executable.writable_by_requester).toBe(true);
+  await openRequest(id);
+  await expect(page.getByText("The requester can modify this file")).toBeVisible();
+  await deny(id);
+  await tidy.finish();
+});
+
 test("delegations let the model approve related work, within limits", async () => {
   const first = await run(["agent-sudo", "echo", "install", "nvidia-headers"]);
   let id = await requestByCode(page, await first.requestId());

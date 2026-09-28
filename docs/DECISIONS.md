@@ -90,3 +90,31 @@ Testing
 - OpenRouter's Decisions endpoint is `https://openrouter.ai/api/alpha/decisions`. The
   operator's OpenRouter guardrail currently blocks `typesafe/jev-1.13`, so that backend
   is covered by parser tests against the documented response, not a live call.
+
+## 2026-09-28 Security review fixes
+
+An independent review of the first build found these; all are fixed and tested
+(service integration tests and the e2e suite).
+
+- **Environment overrides were invisible.** sudo-rs `ALL` rules imply SETENV, so
+  `sudo LD_PRELOAD=… cmd` or `--preserve-env` could change what a grant or approval
+  ran. The binary now sends every override; the UI shows them in the command line;
+  anything outside a short benign list (`DEBIAN_FRONTEND`, `LANG`, `TZ`, …) is a root
+  shell; overrides are part of `command_key` and grant matching.
+- **Naming bypasses of the "never automated" checks.** hostd now reports executable
+  facts and resolved paths; classification uses the canonical executable name and
+  every spelling of path arguments; requester-modifiable executables are root shells;
+  chmod modes are parsed properly (`04755`, `a+rwx,u+s`).
+- **Grants were bound to a path string.** Requests whose target could change after
+  approval (requester-owned symlinks, unverified executables) are never grantable, and
+  grants bind target group, launch type, chdir, and environment too.
+- **Delegation limits raced the model call.** Uses are claimed with a conditional
+  update after the model returns, and the kill switch is re-checked.
+- **A losing decision left a grant behind.** Decision and grant/delegation creation
+  are one transaction.
+- **First passkey registration counted as step-up.** It no longer does.
+- **Enrollment tokens were not consumed atomically.** They are now.
+- Also: nonces are kept for twice the allowed skew, standalone delegations can't
+  silently widen their requester scope, a missing model dimension fails its ceiling,
+  push endpoints must be known push services, and hostd's unit no longer hides `/home`
+  and `/tmp` (it needs them to judge executables and paths).

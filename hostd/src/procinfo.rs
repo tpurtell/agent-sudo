@@ -129,6 +129,31 @@ impl Proc {
             .unwrap_or_default()
     }
 
+    /// Primary and supplementary groups of a process, from /proc/<pid>/status.
+    pub fn groups(&self, pid: u32) -> Vec<u32> {
+        let Ok(text) = std::fs::read_to_string(self.path(pid, "status")) else {
+            return vec![];
+        };
+        let mut out = Vec::new();
+        for line in text.lines() {
+            if let Some(rest) = line.strip_prefix("Gid:") {
+                out.extend(
+                    rest.split_whitespace()
+                        .next()
+                        .and_then(|g| g.parse::<u32>().ok()),
+                );
+            } else if let Some(rest) = line.strip_prefix("Groups:") {
+                out.extend(
+                    rest.split_whitespace()
+                        .filter_map(|g| g.parse::<u32>().ok()),
+                );
+            }
+        }
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
     /// Real uid of a process, from /proc/<pid>/status.
     pub fn real_uid(&self, pid: u32) -> Option<u32> {
         let text = std::fs::read_to_string(self.path(pid, "status")).ok()?;

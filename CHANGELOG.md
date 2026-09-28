@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- The advisor's secret filter now knows which arguments common programs take as
+  passwords (`mysql -p…`, `sshpass -p`, `curl -u`, `htpasswd -b`, `openssl passwd`,
+  `smbclient -U user%…`, `nmcli`, LDAP, Redis, IPMI and more), hides what is echoed
+  into `chpasswd`, `sudo -S`, `--password-stdin` or `cryptsetup`, reads inside
+  `bash -c` strings and history, and also filters the `--chdir` directory and the
+  session names. Before, short passwords given as plain arguments reached the model.
 - `agent-sudo-setup` no longer prints the first-install enroll hint when upgrading,
   and waits for the relay's socket before reporting its status.
 

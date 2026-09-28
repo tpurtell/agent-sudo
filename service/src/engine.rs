@@ -357,7 +357,7 @@ pub fn request_view(state: &AppState, row: &RequestRow, detail: bool) -> Value {
         "argv": env.argv,
         "display": policy::display_command(env),
         "cwd": env.cwd,
-        "chdir": env.chdir,
+        "chdir": env.chdir.as_deref().map(sanitize::redact),
         "tty": env.tty,
         "interactive": env.interactive,
         "nonblocking": env.nonblocking,
@@ -1095,11 +1095,11 @@ pub fn advisor_input(
         "mode": env.mode,
         "launch": env.launch,
         "command": env.command.as_deref().map(sanitize::redact),
-        "arguments": sanitize::redact_argv(&env.argv),
+        "arguments": sanitize::redact_argv(env.command.as_deref(), &env.argv),
         "cwd": env.cwd.as_deref().map(sanitize::redact),
         "chdir": env.chdir,
         "interactive_terminal": env.interactive,
-        "session": {"label": env.session.label, "agent": env.session.agent, "over_ssh": env.session.ssh},
+        "session": {"label": sanitize::redact(&env.session.label), "agent": env.session.agent, "over_ssh": env.session.ssh},
         "process_ancestry": env.session.chain.iter().take(5).map(|p| json!({"name": p.name, "cmdline": sanitize::redact(&p.cmdline.chars().take(160).collect::<String>())})).collect::<Vec<_>>(),
     });
     AdvisorInput {
@@ -1125,7 +1125,7 @@ pub fn advisor_input(
             .collect(),
         requester_supplied: json!({
             "context": env.untrusted.context.as_deref().map(sanitize::redact),
-            "session_label": env.untrusted.session,
+            "session_label": env.untrusted.session.as_deref().map(sanitize::redact),
         }),
     }
 }

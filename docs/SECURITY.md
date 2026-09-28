@@ -83,7 +83,13 @@ agent (untrusted) ──exec──> agent-sudo (setuid root, sudo-rs fork)
    (configurable to deny).
 10. **Secrets are redacted before the model.** Token-like values, credentials in URLs,
     key=value secrets, values after secret-bearing flags, and private keys are
-    removed from everything sent to the advisor. The approver sees the real command.
+    removed from everything sent to the advisor. Command lines, including ones inside
+    `bash -c` and in history, also lose the password arguments of common programs
+    (`mysql -p…`, `sshpass -p`, `curl -u user:…`, `htpasswd -b`, `openssl passwd`,
+    `nmcli … password`, and others) and whatever is echoed into a program that reads
+    a password from standard input (`chpasswd`, `sudo -S`, `--password-stdin`,
+    `cryptsetup`). A short password passed to a program the filter doesn't know still
+    reaches the model. The approver sees the real command.
 11. **Everything is audited** in an append-only table: submissions, decisions (with
     device, auth freshness, scope, and whether the suggestion was followed), grant and
     delegation lifecycle, automated verdicts with their reasons, enrollments, sign-ins

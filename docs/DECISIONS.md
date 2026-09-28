@@ -21,3 +21,15 @@ departs from `PROPOSAL.md` or resolves something it left open.
 - **License.** Apache-2.0 OR MIT for the whole repository, retaining sudo-rs notices.
 - **Operator infrastructure stays out of the repo.** Hostnames, tailnet names, deploy
   scripts for the operator's NAS and hosts live in the gitignored `private/` folder.
+
+## 2026-09-28 Delegated automation is a goal (operator)
+
+- Risk scoring and suggested scope are the baseline advisor behavior and are on
+  whenever an advisor is configured.
+- Automated approval is a goal, not a deferred option, via human-created
+  **delegations** with bounded scope, ttl, risk limits, forbidden features, drift
+  guards, and a global kill switch (PROPOSAL §7.8). Zero delegations ship by default.
+- The advisor still never holds authority of its own; the deterministic policy engine
+  makes every automated decision by applying a delegation to a clamped assessment.
+- Reference test model: an official DeepSeek route behind an OpenAI-compatible
+  gateway; decision-model routing may later go through the same gateway.

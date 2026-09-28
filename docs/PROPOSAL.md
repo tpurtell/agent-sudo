@@ -1,6 +1,6 @@
 # agent-sudo: brokered privilege escalation for agent-driven machines
 
-Status: draft v0.2 (2026-09-28). Decisions taken so far are in `docs/DECISIONS.md`. This is the implementation proposal handed to the
+Status: draft v0.3 (2026-09-28). Decisions taken so far are in `docs/DECISIONS.md`. This is the implementation proposal handed to the
 implementing model. It states intent, invariants, and the shape of each component.
 It deliberately leaves internal details open. The implementer is expected to make
 design corrections as requirements clarify, and to record each correction in
@@ -42,6 +42,13 @@ Goals
   revocable sessions; step-up authentication only for dangerous classes.
 - Every privileged decision is attributable: who, from which device, for which
   exact command, under which scope, and whether an LLM suggestion was followed.
+- Decision assistance is a first-class feature: every pending request carries a risk
+  score, per-dimension probabilities, and a suggested scope built from the command,
+  deterministic features, and recent activity across the fleet.
+- **Delegated automation.** An approver can hand a bounded slice of their authority to
+  the decision model: "for the next 30 minutes, on these hosts, let the model approve
+  anything it rates low-risk and relevant to installing NVIDIA drivers". Delegations
+  are explicit, scoped, revocable, and loud. Nothing is delegated by default.
 - The forked binary stays auditable: compiled without the `agent-approval` feature it
   must be byte-for-byte upstream sudo-rs behavior, and the patch set stays small.
 
@@ -50,7 +57,8 @@ Non-goals (v1)
 - Replacing the system `sudo` for humans. Install alongside; reach it via shim.
 - Session recording, output capture, or command sandboxing.
 - Fleet-wide sudoers distribution. Sudoers stays local and boring.
-- LLM auto-approval. The mechanism is designed in and shipped disabled.
+- Delegations that exist without a human creating them. The software ships with the
+  advisor optional and with zero delegations; every delegation traces to an approver.
 - Windows, macOS, or BSD hosts. Linux with PAM only.
 
 ## 3. Topology
@@ -106,10 +114,16 @@ These are the rules the implementation must not violate. Tests should encode the
 6. **Remote approval does not refresh the local sudo timestamp** unless the approver
    explicitly chose "authenticate normal sudo for N minutes". Otherwise a narrowly
    scoped remote approval would silently unlock unrelated `sudo` calls.
-7. **The advisor cannot approve.** The advisor module has no code path that creates a
-   grant or resolves a request. Its output is clamped by deterministic config before
-   reaching the UI. Auto-approval, if ever enabled, is a deterministic rule that reads
-   advisor output; the rule and its inputs are logged.
+7. **The advisor never holds authority of its own.** The advisor module returns
+   assessments; it has no code path that creates a grant or resolves a request. Every
+   automated approval is made by the deterministic policy engine applying a
+   human-created **delegation** (§7.8) to a clamped advisor result. A delegation is
+   created with passkey step-up, has a bounded scope and ttl, can only *approve*
+   (a model "deny" routes to a human, it never blocks a human from approving), fails
+   closed to the human path on advisor error or timeout, and can be revoked from
+   any device in one tap. A global automation kill switch exists. Every automated
+   decision logs the delegation id, model, raw and clamped assessment, and the
+   envelope check that passed.
 8. **Approval is a POST with CSRF binding and version check.** Opening a notification
    URL never approves. A decision on an already-resolved request returns 409.
 9. **Fail closed for headless callers.** If hostd or the service is unreachable and
@@ -246,7 +260,8 @@ classes are stored rather than configured, and `settings`.
 
 ```
 submitted ─┬─ matched existing grant ──────────────> approved (grant use recorded)
-           ├─ auto-approve rule (off by default) ──> approved
+           ├─ matched delegation ─> advisor (sync, bounded) ─> envelope ok ─> approved (informational push)
+           │                                      └─ else falls through to pending with the assessment attached
            └─ pending ──> notify devices, advisor runs async, UI updates live
                   ├─ approver decision ──> approved | denied (hard or soft)
                   ├─ client cancel ──────> withdrawn
@@ -274,9 +289,11 @@ Config file (YAML or TOML, mounted read-only; hot-reloaded) with:
   root shells (`bash`, `sh`, `su`, `-i`, `-s`) with `require_each_time` and step-up.
 - `approvers`: which users are notified for requests from which hosts/users. Default:
   every user with the approver role.
-- `advisor`: provider, model, history window, output clamp (max suggested scope/ttl).
-- `auto_approve`: present in the schema, documented, `enabled: false` by default, with
-  the threshold shape sketched in the origin discussion.
+- `advisor`: provider, model, history window, output clamp (max suggested scope/ttl),
+  synchronous timeout for delegated decisions.
+- `delegations`: optional *standing* delegations defined in config (same shape as the
+  ad-hoc ones in §7.8, minus the ttl). Empty by default.
+- `automation.enabled`: global kill switch for all delegated decisions.
 
 The policy engine also computes deterministic features attached to every request
 (root-shell capable, package manager, service control, touches `/etc`, writes to
@@ -327,14 +344,54 @@ Trait `DecisionAdvisor` with two backends behind one normalized result:
   `choice` question for suggested scope. Probabilities are kept and displayed.
 
 Inputs: the sanitized request, deterministic features, the matched class and its
-envelope, and recent history (`max_requests`, `max_age`, same user, prefer same
-session and same host group). The prompt states that argv, cwd, and agent context are
-untrusted data, never instructions.
+envelope, recent history (`max_requests`, `max_age`, same user, prefer same session
+and same host group, including recent automated decisions and any human overrides of
+them), and, when a delegation matched, the delegation's human-written intent and
+its limits. The prompt states that argv, cwd, and agent context are untrusted data,
+never instructions, and that the intent text is the approver's, not the agent's.
+
+Both backends take a configurable base URL, so a LiteLLM-style gateway can front the
+chat backend today and the decisions backend later. History composition is its own
+module with tests: it is the part that makes "you approved this on four other Sparks
+nine minutes ago" visible to the model and the UI alike.
 
 Normalized output: risk 0–100 with confidence, per-dimension probabilities, suggested
 decision/scope/ttl, and a short summary. The clamp step enforces the class envelope
 before storage. Advisor failure or slowness never blocks the request; the UI shows
 "analysis unavailable". Advisor calls, latency, cost, and raw responses are logged.
+
+### 7.8 Delegated decisions
+
+A **delegation** is a grant whose approver is the policy engine consulting the
+advisor. An approver creates one either ad hoc from a pending request ("let the
+model handle requests like this") or from the grants page, or an admin defines a
+standing one in config. Creating one requires passkey step-up. Fields:
+
+- `intent`: one or two sentences from the approver describing what work is expected.
+  Shown in the UI, given to the model, and used as the relevance anchor.
+- scope: hosts (this host | group | all), requester (unix user | session fingerprint),
+  ttl (bounded by `automation.max_ttl`), optional command classes included or excluded.
+- limits: `max_risk` (0–100), `min_confidence`, per-dimension ceilings (destructive,
+  privilege escape, persistence, credential access, network/security change),
+  `max_decisions` in the window, and a forbidden-features list that defaults to
+  root-shell-capable, approval-system paths, and credential access regardless of
+  the model's opinion.
+- notification: `each` (push per automated approval), `digest` (one summary push per
+  N minutes), or `silent` (UI only). Default `each`.
+
+Evaluation for a request matching a delegation: run the advisor synchronously with
+the configured timeout; clamp; check every limit deterministically; if all pass,
+approve as `decided_by: delegation:<id>` and record the assessment. Any failure
+(advisor error, timeout, limit exceeded, model suggests deny or a narrower scope)
+falls through to the normal human path with the assessment already attached, so the
+approver sees why automation declined. The UI shows automated approvals in a distinct
+style with a one-tap **Stop delegation** action that revokes it and, optionally,
+revokes grants it created.
+
+Drift guards, deterministic and configurable: a delegation pauses itself and notifies
+when it hits `max_decisions`, when a human overrides one of its outcomes, or when the
+advisor's risk for consecutive requests trends above a threshold. A paused delegation
+needs a human tap to resume.
 
 ### 7.7 HTTP API (shape only)
 
@@ -445,8 +502,14 @@ Operator-specific deployment lives outside this repo and is not referenced from 
 3. **Passkeys, devices, push, PWA.** Demo: phone notification, one-tap approve.
 4. **Interactive race.** TTY poll integration, remote-approve message, timestamp
    semantics, hard-deny classes, cancel on SIGINT. Demo: password and phone race.
-5. **Advisor.** Both backends, sanitizer, clamp, history, UI "why" panel.
-6. **Polish and ship.** Shim installer, skill, install script, docs, CI, e2e test,
+5. **Advisor.** Both backends, sanitizer, clamp, history composition, UI "why"
+   panel. Reference test model is a DeepSeek route behind an OpenAI-compatible
+   gateway; tests run against a recorded mock so CI needs no key.
+6. **Delegated decisions.** Delegation model, synchronous evaluation, envelope
+   checks, drift guards, notifications, stop action, standing delegations in config.
+   Demo: approve one driver install by hand, delegate 30 minutes for the host group,
+   watch the next five hosts' requests approve themselves with the reasoning shown.
+7. **Polish and ship.** Shim installer, skill, install script, docs, CI, e2e test,
    first tagged release.
 
 ## 12. Implementer latitude

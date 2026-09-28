@@ -24,21 +24,24 @@ COPY --from=web /web/dist service/web/dist
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
     --mount=type=cache,target=/src/sudo/target \
-    cargo build --release --locked -p agent-sudo-service -p agent-sudo-hostd \
- && (cd sudo && cargo build --release --locked --features agent-approval,pam-login --bin sudo) \
- && mkdir -p /out \
- && cp target/release/agent-sudo-service target/release/agent-sudo-hostd /out/ \
- && cp sudo/target/release/sudo /out/agent-sudo
+    sh docker/build-binaries.sh
+
+# Host bundle for this machine's architecture.
+FROM build AS host-dist-stage
+RUN mkdir /bundle && cp /out/dist/$(cat /out/dist/NATIVE)/* /bundle/
 
 FROM scratch AS host-dist
-COPY --from=build /out/agent-sudo /out/agent-sudo-hostd /
-COPY deploy/host/ /
+COPY --from=host-dist-stage /bundle/ /
 
 FROM debian:bookworm-slim AS service
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates libssl3 && rm -rf /var/lib/apt/lists/* \
  && useradd --system --uid 10001 --home /data --shell /usr/sbin/nologin agent-sudo \
  && mkdir -p /data /etc/agent-sudo && chown agent-sudo /data
 COPY --from=build /out/agent-sudo-service /usr/local/bin/
+# Host binaries for this image's architecture and the one-line installer, served at
+# /install.sh and /dist/ so a same-architecture host needs nothing but curl.
+COPY --from=build /out/dist /usr/local/share/agent-sudo/dist
+COPY deploy/host/get.sh /usr/local/share/agent-sudo/install.sh
 USER agent-sudo
 VOLUME /data
 EXPOSE 8080
@@ -53,8 +56,8 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
  && useradd --create-home --shell /bin/bash --uid 1500 agent \
  && useradd --create-home --shell /bin/bash --uid 1501 stranger \
  && echo 'agent:agent-password' | chpasswd
-COPY --from=build /out/agent-sudo /usr/local/bin/agent-sudo
-COPY --from=build /out/agent-sudo-hostd /usr/local/sbin/agent-sudo-hostd
+COPY --from=host-dist-stage /bundle/agent-sudo /usr/local/bin/agent-sudo
+COPY --from=host-dist-stage /bundle/agent-sudo-hostd /usr/local/sbin/agent-sudo-hostd
 COPY e2e/host/ /
 RUN chmod 4755 /usr/local/bin/agent-sudo && chmod 0440 /etc/sudoers && chmod 0755 /usr/local/bin/e2e-* /etc/agent-sudo && chmod 0644 /etc/agent-sudo/client.conf /etc/pam.d/sudo /etc/pam.d/sudo-i
 ENTRYPOINT ["/usr/local/bin/e2e-entrypoint"]

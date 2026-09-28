@@ -14,11 +14,13 @@ mod audit;
 mod auth;
 mod config;
 mod db;
+mod distribution;
 mod engine;
 mod error;
 mod events;
 mod grants;
 mod hostapi;
+mod init;
 mod passkeys;
 mod policy;
 mod push;
@@ -55,6 +57,8 @@ struct Cli {
 enum Command {
     /// Run the service (default).
     Serve,
+    /// Create a deployment directory (compose file, config, .env) interactively.
+    Init(Box<init::InitArgs>),
     /// Exit 0 if the service answers on URL (for container health checks).
     Health {
         #[arg(default_value = "http://127.0.0.1:8080/api/health")]
@@ -111,6 +115,7 @@ pub fn app(state: Shared) -> Router {
     Router::new()
         .merge(hostapi::router())
         .merge(webapi::router())
+        .merge(distribution::router())
         .fallback(assets::serve)
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
@@ -157,7 +162,31 @@ async fn serve(state: Shared) -> Result<()> {
     Ok(())
 }
 
+/// Assess one sample request with the configured model (used by advisor-test and init).
+pub async fn advisor_sample(cfg: ServiceConfig) -> Result<advisor::Assessment> {
+    let state = build_state(cfg, db::Db::memory()?)?;
+    let (a, _, _) = sample_assessment(
+        &state,
+        "/usr/bin/apt install -y jq".into(),
+        Some("Installing jq to parse JSON in a build script".into()),
+    )
+    .await?;
+    Ok(a)
+}
+
 async fn advisor_test(state: Shared, command: String, context: Option<String>) -> Result<()> {
+    let (a, class, features) = sample_assessment(&state, command, context).await?;
+    println!("class: {} ({})", class.name, class.title);
+    println!("features: {}", features.keys().join(", "));
+    println!("{}", serde_json::to_string_pretty(&a)?);
+    Ok(())
+}
+
+async fn sample_assessment(
+    state: &Shared,
+    command: String,
+    context: Option<String>,
+) -> Result<(advisor::Assessment, policy::ClassConfig, policy::Features)> {
     let advisor = state
         .advisor
         .clone()
@@ -237,9 +266,7 @@ async fn advisor_test(state: Shared, command: String, context: Option<String>) -
         last_seen_at: None,
         revoked_at: None,
     };
-    let input = engine::advisor_input(&state, &row, &host, &class, None);
-    println!("class: {} ({})", class.name, class.title);
-    println!("features: {}", features.keys().join(", "));
+    let input = engine::advisor_input(state, &row, &host, &class, None);
     let a = advisor.assess(&input).await?;
     let a = advisor::clamp(
         a,
@@ -247,8 +274,7 @@ async fn advisor_test(state: Shared, command: String, context: Option<String>) -
         &features,
         advisor.config.max_suggested_ttl_minutes,
     );
-    println!("{}", serde_json::to_string_pretty(&a)?);
-    Ok(())
+    Ok((a, class, features))
 }
 
 #[tokio::main]
@@ -260,7 +286,13 @@ async fn main() -> Result<()> {
         )
         .with_target(false)
         .init();
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
+    if let Some(Command::Init(_)) = &cli.command {
+        let Some(Command::Init(args)) = cli.command.take() else {
+            unreachable!()
+        };
+        return init::run(*args).await;
+    }
     if let Some(Command::Health { url }) = &cli.command {
         let ok = reqwest::Client::new()
             .get(url)
@@ -329,7 +361,7 @@ async fn main() -> Result<()> {
                 Command::AdvisorTest { command, context } => {
                     advisor_test(state, command, context).await
                 }
-                Command::CheckConfig | Command::Health { .. } => unreachable!(),
+                Command::CheckConfig | Command::Health { .. } | Command::Init(_) => unreachable!(),
             }
         }
     }

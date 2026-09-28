@@ -27,8 +27,13 @@ struct Harness {
 }
 
 fn config(extra: &str) -> ServiceConfig {
+    // Top-level keys must come before the [push] table.
+    let (top, rest): (Vec<&str>, Vec<&str>) =
+        extra.lines().partition(|l| l.starts_with("host_dist_dir"));
     let cfg: ServiceConfig = toml::from_str(&format!(
-        "public_url = \"{ORIGIN}\"\n[push]\nenabled = false\n{extra}"
+        "public_url = \"{ORIGIN}\"\n{}\n[push]\nenabled = false\n{}",
+        top.join("\n"),
+        rest.join("\n")
     ))
     .unwrap();
     cfg.validate().unwrap();
@@ -845,4 +850,60 @@ async fn standalone_delegations_cannot_silently_widen() {
         .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(d["spec"]["requester"]["user"], "tj");
+}
+
+#[tokio::test]
+async fn serves_the_installer_and_host_binaries() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("install.sh"),
+        "SERVICE=\"__AGENT_SUDO_URL__\"\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(dir.path().join("dist/arm64")).unwrap();
+    std::fs::write(dir.path().join("dist/arm64/agent-sudo"), "binary").unwrap();
+    std::fs::write(
+        dir.path().join("dist/SHA256SUMS"),
+        "abc  arm64/agent-sudo\n",
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("secret"), "nope").unwrap();
+    let h = Harness::new(&format!("host_dist_dir = \"{}\"\n", dir.path().display())).await;
+    let get = |path: &str| {
+        let app = h.app.clone();
+        let path = path.to_string();
+        async move {
+            let resp = app
+                .oneshot(Request::get(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            let status = resp.status();
+            (
+                status,
+                String::from_utf8(
+                    resp.into_body()
+                        .collect()
+                        .await
+                        .unwrap()
+                        .to_bytes()
+                        .to_vec(),
+                )
+                .unwrap(),
+            )
+        }
+    };
+    let (status, script) = get("/install.sh").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(script, "SERVICE=\"https://sudo.test\"\n");
+    assert_eq!(
+        get("/dist/arm64/agent-sudo").await,
+        (StatusCode::OK, "binary".into())
+    );
+    assert_eq!(get("/dist/SHA256SUMS").await.0, StatusCode::OK);
+    assert_eq!(
+        get("/dist/arm64/..%2F..%2Fsecret").await.0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(get("/dist/riscv/agent-sudo").await.0, StatusCode::NOT_FOUND);
+    assert_eq!(get("/dist/amd64/agent-sudo").await.0, StatusCode::NOT_FOUND);
 }

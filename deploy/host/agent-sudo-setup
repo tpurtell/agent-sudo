@@ -1,0 +1,145 @@
+#!/bin/sh
+# Install agent-sudo from a Homebrew (or other) bundle into root-owned locations.
+#
+#   sudo "$(brew --prefix)/bin/agent-sudo-setup" --enroll https://SERVICE TOKEN   # first time
+#   sudo "$(brew --prefix)/bin/agent-sudo-setup"                                  # after brew upgrade
+#   sudo "$(brew --prefix)/bin/agent-sudo-setup" --uninstall
+#   "$(brew --prefix)/bin/agent-sudo-setup" --check     # verify the bundle, no root needed
+#
+# Why this step exists: agent-sudo is setuid root and its relay runs as root, so they
+# must not execute from a prefix your user (and therefore your agents) can write.
+# This copies them to /usr/local, owned by root, after checking that neither binary
+# loads anything from a writable location (dynamic loader, RPATH/RUNPATH).
+#
+# Running it trusts the bundle at that moment, like any command you run with sudo.
+set -eu
+
+self=$(readlink -f "$0")
+tarball="$(dirname "$self")/../libexec/agent-sudo/host-bundle.tar"
+python=/usr/bin/python3
+[ -x "$python" ] || { echo "agent-sudo-setup: $python is required to verify the binaries" >&2; exit 1; }
+
+# Unpack into a private directory. Homebrew rewrites the ELF loader of every binary it
+# pours, so the host binaries travel as a tarball that it leaves untouched.
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+chmod 700 "$work"
+if [ -f "$tarball" ]; then
+    tar -xf "$tarball" -C "$work" --no-same-owner
+    bundle=$work
+else
+    bundle=$(dirname "$self")   # a plain bundle directory (docker build --target host-dist)
+fi
+for f in agent-sudo agent-sudo-hostd agent-sudo-hostd.service install.sh; do
+    [ -f "$bundle/$f" ] || { echo "agent-sudo-setup: missing $f in the bundle" >&2; exit 1; }
+done
+
+verify() {
+    # Refuse binaries that could load code from a location a non-root user can change,
+    # or that need a newer glibc than the Ubuntu 24.04 baseline.
+    "$python" - "$bundle/agent-sudo" "$bundle/agent-sudo-hostd" <<'PY'
+import os, stat, struct, sys
+
+def writable_by_others(path):
+    """True if a non-root user could modify path or any directory above it."""
+    path = os.path.realpath(path)
+    while True:
+        st = os.stat(path)
+        if st.st_uid != 0 or st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+            return True
+        if path == "/":
+            return False
+        path = os.path.dirname(path)
+
+def check(binary):
+    data = open(binary, "rb").read()
+    if data[:4] != b"\x7fELF" or data[4] != 2 or data[5] != 1:
+        sys.exit(f"{binary}: not a 64-bit little-endian ELF file")
+    phoff, = struct.unpack_from("<Q", data, 0x20)
+    phentsize, phnum = struct.unpack_from("<HH", data, 0x36)
+    interp, dynamic, loads = None, None, []
+    for i in range(phnum):
+        off = phoff + i * phentsize
+        ptype, = struct.unpack_from("<I", data, off)
+        p_offset, p_vaddr = struct.unpack_from("<QQ", data, off + 8)
+        p_filesz, = struct.unpack_from("<Q", data, off + 32)
+        if ptype == 3:  # PT_INTERP
+            interp = data[p_offset:p_offset + p_filesz].rstrip(b"\0").decode()
+        elif ptype == 2:  # PT_DYNAMIC
+            dynamic = (p_offset, p_filesz)
+        elif ptype == 1:  # PT_LOAD
+            loads.append((p_vaddr, p_offset, p_filesz))
+    if interp is None:
+        sys.exit(f"{binary}: no ELF interpreter")
+    if not (interp.startswith("/lib") or interp.startswith("/usr/lib")) or writable_by_others(interp):
+        sys.exit(f"{binary}: refuses to install: loader {interp} is not a root-owned system path")
+    strtab, runpaths = None, []
+    if dynamic:
+        off, size = dynamic
+        entries = [struct.unpack_from("<qQ", data, off + j) for j in range(0, size, 16)]
+        for tag, val in entries:
+            if tag == 5:  # DT_STRTAB (virtual address)
+                for vaddr, foff, fsz in loads:
+                    if vaddr <= val < vaddr + fsz:
+                        strtab = foff + (val - vaddr)
+            if tag in (15, 29):  # DT_RPATH, DT_RUNPATH
+                runpaths.append(val)
+    for val in runpaths:
+        name = "?"
+        if strtab is not None:
+            end = data.index(b"\0", strtab + val)
+            name = data[strtab + val:end].decode()
+        sys.exit(f"{binary}: refuses to install: embedded library path {name}")
+
+import re
+GLIBC_CEILING = (2, 39)
+
+def glibc_ok(binary):
+    needed = [tuple(map(int, m.groups())) for m in re.finditer(rb"GLIBC_(\d+)\.(\d+)", open(binary, "rb").read())]
+    if needed and max(needed) > GLIBC_CEILING:
+        sys.exit(f"{binary}: needs glibc {'.'.join(map(str, max(needed)))}, newer than 2.39")
+
+for b in sys.argv[1:]:
+    check(b)
+    glibc_ok(b)
+PY
+}
+
+if [ "${1:-}" = "--check" ]; then
+    verify
+    "$bundle/agent-sudo-hostd" --version
+    echo "bundle verified: system loader, no embedded library paths, glibc <= 2.39"
+    exit 0
+fi
+
+if [ "$(id -u)" -ne 0 ]; then
+    echo "Run with sudo: sudo \"$self\" $*" >&2
+    exit 1
+fi
+
+if [ "${1:-}" = "--uninstall" ]; then
+    exec sh "$bundle/install.sh" --uninstall
+fi
+
+verify
+
+if [ -e /etc/agent-sudo/hostd.toml ]; then
+    if [ "${1:-}" = "--enroll" ]; then
+        echo "This host is already enrolled; upgrading the binaries and keeping its identity."
+        echo "(To enroll again, remove /etc/agent-sudo/hostd.toml and host.key first.)"
+    fi
+    sh "$bundle/install.sh"
+    systemctl restart agent-sudo-hostd
+    /usr/local/sbin/agent-sudo-hostd status
+elif [ "${1:-}" = "--enroll" ]; then
+    url=${2:?usage: agent-sudo-setup --enroll URL TOKEN}
+    token=${3:?usage: agent-sudo-setup --enroll URL TOKEN}
+    shift 3
+    sh "$bundle/install.sh" --enroll "$url" "$token" "$@"
+    echo
+    echo "Next, as your own user (not root):"
+    echo "  agent-sudo-hostd skill install    # teach your coding agents to use agent-sudo"
+else
+    sh "$bundle/install.sh"
+    echo "Enroll with: sudo \"$self\" --enroll https://SERVICE TOKEN"
+fi

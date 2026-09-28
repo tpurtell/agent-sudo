@@ -17,6 +17,7 @@ mod facts;
 mod procinfo;
 mod relay;
 mod service;
+mod skill;
 
 use config::HostdConfig;
 
@@ -67,6 +68,28 @@ enum Command {
         #[command(subcommand)]
         action: ShimAction,
     },
+    /// Install the optional skill that teaches coding agents to use agent-sudo.
+    Skill {
+        #[command(subcommand)]
+        action: SkillAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum SkillAction {
+    /// Detect installed agents and write the skill where each one reads it.
+    Install {
+        /// Don't ask for confirmation.
+        #[arg(long)]
+        yes: bool,
+        /// Only show where it would be written.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Remove the skill from every location.
+    Remove,
+    /// Show detected agents and where the skill is installed.
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -360,5 +383,10 @@ async fn main() -> Result<()> {
         }
         Command::Status => status(&cli.config).await,
         Command::Shim { action } => shim(action),
+        Command::Skill { action } => match action {
+            SkillAction::Install { yes, dry_run } => skill::install(yes, dry_run),
+            SkillAction::Remove => skill::remove(),
+            SkillAction::Status => skill::status(),
+        },
     }
 }

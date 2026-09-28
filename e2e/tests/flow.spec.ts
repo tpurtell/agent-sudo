@@ -59,8 +59,9 @@ test("a host enrolls with a one-time token", async () => {
   await dialog.getByLabel("Name").fill("e2e");
   await dialog.getByLabel("Groups").fill("lab");
   await dialog.getByRole("button", { name: "Create enrollment command" }).click();
-  const command = await dialog.locator(".cmd").first().innerText();
-  const token = command.match(/--token (\S+)/)![1]!;
+  const commands = (await dialog.locator(".cmd").allTextContents()).join("\n");
+  expect(commands).toContain("brew install tpurtell/local-ai/agent-sudo");
+  const token = commands.match(/--token (\S+)/)![1]!;
   await hr("/enroll", { token, name: "e2e" });
   await dialog.getByRole("button", { name: "Done" }).click();
   await expect(page.locator(".host-row").filter({ hasText: "e2e" })).toBeVisible();

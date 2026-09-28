@@ -1,23 +1,28 @@
 ---
 name: agent-sudo
-description: Use when a task needs root or sudo on a machine that uses agent-sudo (sudo requests are approved remotely by a human). Explains how to run privileged commands so the approver can decide quickly.
+description: Use whenever a task needs root or sudo. On machines with agent-sudo, privileged commands are approved remotely by a human; this explains how to run them (agent-sudo --agent-context "why" …) so the approver can decide quickly.
 ---
 
 # Running privileged commands with agent-sudo
 
-On this machine `sudo` is brokered: each privileged command is sent to a human
+On this machine privileged commands are brokered: each one is sent to a human
 approver's phone or desktop, possibly with an AI risk assessment, and runs once they
-approve. You don't need a password. Keep using `sudo` normally, with these habits.
+approve. You don't need a password.
 
-## Explain why, in one sentence
+## Use agent-sudo, and explain why in one sentence
 
-Add `--agent-context` before the command. The approver sees it next to the exact
-command line:
+Run privileged commands with `agent-sudo` instead of `sudo`. It accepts the same
+options. Add `--agent-context` before the command; the approver sees it next to the
+exact command line:
 
 ```sh
-sudo --agent-context "Installing kernel headers needed to build the NVIDIA RDMA module" \
+agent-sudo --agent-context "Installing kernel headers needed to build the NVIDIA RDMA module" \
   apt-get install -y linux-headers-$(uname -r)
 ```
+
+If `agent-sudo` isn't on this machine, use plain `sudo` without the extra option.
+Plain `sudo` may also be routed through agent-sudo here; that works too, and
+`sudo --agent-context …` is accepted when it is.
 
 Say what the command is for and what will change. Plain words, no markdown, under
 about 200 characters. The approver is told this text is unverified, so it must be

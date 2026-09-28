@@ -36,6 +36,10 @@ pub struct ServiceConfig {
     /// Serve the UI from this directory instead of the embedded copy (development).
     #[serde(default)]
     pub web_dir: Option<PathBuf>,
+    /// Directory holding `install.sh` and `dist/<arch>/` host binaries (the image
+    /// ships them); served at /install.sh and /dist/.
+    #[serde(default = "default_host_dist")]
+    pub host_dist_dir: PathBuf,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -93,6 +97,9 @@ fn default_name() -> String {
 }
 fn default_listen() -> SocketAddr {
     "0.0.0.0:8080".parse().unwrap()
+}
+fn default_host_dist() -> PathBuf {
+    PathBuf::from("/usr/local/share/agent-sudo")
 }
 fn default_db() -> PathBuf {
     PathBuf::from("/data/agent-sudo.db")

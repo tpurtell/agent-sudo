@@ -940,14 +940,15 @@ async fn host_token(
         json!({"name": name, "groups": groups}),
     );
     state.emit(Event::Hosts);
-    // Enroll and start the relay in one paste (binaries installed by install.sh).
-    let command = format!(
-        "sudo /usr/local/sbin/agent-sudo-hostd enroll --service {} --token {} && sudo systemctl enable --now agent-sudo-hostd",
-        state.cfg.base_url(),
-        token
+    let base = state.cfg.base_url();
+    // Homebrew delivers versioned bottles; the setup step installs them root-owned.
+    let brew = format!(
+        "brew install tpurtell/local-ai/agent-sudo\nsudo \"$(brew --prefix)/bin/agent-sudo-setup\" --enroll {base} {token}"
     );
+    // Without Homebrew: the service serves its own architecture's bundle.
+    let command = format!("curl -fsSL {base}/install.sh | sudo sh -s -- --token {token}");
     Ok(Json(
-        json!({"id": id, "token": token, "expires_at": expires, "command": command}),
+        json!({"id": id, "token": token, "expires_at": expires, "command": command, "brew": brew}),
     ))
 }
 

@@ -28,7 +28,7 @@ function addHostSheet(existingGroups: string[], reload: () => void) {
     create.addEventListener("click", () =>
       void busy(create, async () => {
         await ensureStrong();
-        const t = await api<{ token: string; command: string; expires_at: number }>("POST", "/api/hosts/tokens", {
+        const t = await api<{ token: string; command: string; brew: string; expires_at: number }>("POST", "/api/hosts/tokens", {
           name: name.value.trim() || null,
           groups: groups.value.split(",").map((g) => g.trim()).filter(Boolean),
           ttl_minutes: 60,
@@ -38,9 +38,10 @@ function addHostSheet(existingGroups: string[], reload: () => void) {
         tick();
         const timer = window.setInterval(tick, 1000);
         body.replaceChildren(
-          h("p", { class: "small muted" }, "With agent-sudo installed on the host (install.sh from the host bundle), run:"),
-          copyBox(t.command),
-          h("p", { class: "small muted" }, "It registers the host and starts its relay. Then, in each agent's environment: ", h("code", {}, "agent-sudo-hostd shim install"), " and put ", h("code", {}, "~/.agent-tools"), " first on its PATH."),
+          h("p", { class: "small muted" }, "On the host, with Homebrew:"),
+          copyBox(t.brew),
+          h("details", { class: "more" }, h("summary", {}, icon("chevron"), "Without Homebrew"), h("div", { class: "stack tight", style: "margin-top:8px" }, copyBox(t.command), h("p", { class: "tiny faint" }, "Downloads the bundle this service carries for its own architecture."))),
+          h("p", { class: "small muted" }, "Either way the host is enrolled and its relay started. Then, as your user: ", h("code", {}, "agent-sudo-hostd skill install"), " teaches your coding agents to use it."),
           h("div", { class: "tiny faint" }, left),
           h("button", { type: "button", class: "btn block", onclick: () => { window.clearInterval(timer); close(); reload(); } }, "Done"),
         );

@@ -940,8 +940,9 @@ async fn host_token(
         json!({"name": name, "groups": groups}),
     );
     state.emit(Event::Hosts);
+    // Enroll and start the relay in one paste (binaries installed by install.sh).
     let command = format!(
-        "sudo agent-sudo-hostd enroll --service {} --token {}",
+        "sudo agent-sudo-hostd enroll --service {} --token {} && sudo systemctl enable --now agent-sudo-hostd",
         state.cfg.base_url(),
         token
     );

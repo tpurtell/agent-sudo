@@ -38,16 +38,9 @@ function addHostSheet(existingGroups: string[], reload: () => void) {
         tick();
         const timer = window.setInterval(tick, 1000);
         body.replaceChildren(
-          h("p", { class: "small muted" }, "On the host, as root:"),
-          h("ol", { class: "stack tight small", style: "margin:0;padding-left:20px" },
-            h("li", {}, "Install ", h("code", {}, "agent-sudo"), " and ", h("code", {}, "agent-sudo-hostd"), " (see the install guide)."),
-            h("li", {}, "Enroll:"),
-          ),
+          h("p", { class: "small muted" }, "With agent-sudo installed on the host (install.sh from the host bundle), run:"),
           copyBox(t.command),
-          h("ol", { class: "stack tight small", start: "3", style: "margin:0;padding-left:20px" },
-            h("li", {}, "Start the relay: ", h("code", {}, "systemctl enable --now agent-sudo-hostd")),
-            h("li", {}, "In each agent's environment: ", h("code", {}, "agent-sudo-hostd shim install"), " and put ", h("code", {}, "~/.agent-tools"), " first on its PATH."),
-          ),
+          h("p", { class: "small muted" }, "It registers the host and starts its relay. Then, in each agent's environment: ", h("code", {}, "agent-sudo-hostd shim install"), " and put ", h("code", {}, "~/.agent-tools"), " first on its PATH."),
           h("div", { class: "tiny faint" }, left),
           h("button", { type: "button", class: "btn block", onclick: () => { window.clearInterval(timer); close(); reload(); } }, "Done"),
         );

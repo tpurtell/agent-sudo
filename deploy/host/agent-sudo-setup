@@ -128,8 +128,13 @@ if [ -e /etc/agent-sudo/hostd.toml ]; then
         echo "This host is already enrolled; upgrading the binaries and keeping its identity."
         echo "(To enroll again, remove /etc/agent-sudo/hostd.toml and host.key first.)"
     fi
-    sh "$bundle/install.sh"
+    AGENT_SUDO_SETUP=1 sh "$bundle/install.sh"
     systemctl restart agent-sudo-hostd
+    # Give the relay a moment to open its socket before reporting on it.
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        [ -S /run/agent-sudo/hostd.sock ] && break
+        sleep 0.5
+    done
     /usr/local/sbin/agent-sudo-hostd status
 elif [ "${1:-}" = "--enroll" ]; then
     url=${2:?usage: agent-sudo-setup --enroll URL TOKEN}
@@ -140,6 +145,6 @@ elif [ "${1:-}" = "--enroll" ]; then
     echo "Next, as your own user (not root):"
     echo "  agent-sudo-hostd skill install    # teach your coding agents to use agent-sudo"
 else
-    sh "$bundle/install.sh"
+    AGENT_SUDO_SETUP=1 sh "$bundle/install.sh"
     echo "Enroll with: sudo \"$self\" --enroll https://SERVICE TOKEN"
 fi

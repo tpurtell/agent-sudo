@@ -62,6 +62,6 @@ if [ "${1:-}" = "--enroll" ]; then
     systemctl enable --now agent-sudo-hostd
     sleep 1
     "$sbin" status
-else
+elif [ ! -e /etc/agent-sudo/hostd.toml ] && [ -z "${AGENT_SUDO_SETUP:-}" ]; then
     echo "Next: $sbin enroll --service https://… --token …  &&  systemctl enable --now agent-sudo-hostd"
 fi

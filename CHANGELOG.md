@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- `agent-sudo-setup` no longer prints the first-install enroll hint when upgrading,
+  and waits for the relay's socket before reporting its status.
+
 ## 0.2.0 (2026-09-28)
 
 Delegation you can say yes to without thinking about it.

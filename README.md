@@ -52,38 +52,47 @@ whichever succeeds first wins. Without one (the usual agent case), sudo prints
 
 ## Quick start
 
-1. **Run the service** where your devices can reach it over HTTPS. The Tailscale
-   profile gives you a real certificate on your tailnet with no open ports:
+1. **Create the service deployment** where your devices can reach it over HTTPS. The
+   interactive `init` asks about the front door (Tailscale or your own certificate)
+   and an optional decision model, tests the model, and writes a ready folder:
 
    ```sh
-   cd deploy/service
-   cp .env.example .env && cp service.example.toml service.toml   # fill in both
-   docker compose --profile tailscale up -d
-   docker compose logs service | grep setup   # open the one-time setup link
+   brew install tpurtell/local-ai/agent-sudo
+   agent-sudo-service init agent-sudo
+   # without Homebrew:
+   #   docker run --rm -it --user "$(id -u):$(id -g)" -v "$PWD:/out" \
+   #     ghcr.io/tpurtell/agent-sudo-service init /out/agent-sudo
+   cd agent-sudo && docker compose up -d
+   docker compose logs service | grep setup          # the one-time setup link
    ```
 
 2. **Set up your account**: create the admin, add a passkey, turn on notifications
    (on iPhone, Add to Home Screen first).
 
-3. **Enroll a host**: Hosts → Add a host gives you a one-time command.
+3. **Enroll hosts.** Hosts → Add gives you two lines for each machine:
 
    ```sh
-   docker build --target host-dist --output dist .   # or grab a release
-   sudo dist/install.sh --enroll https://agent-sudo.your-tailnet.ts.net <token>
+   brew install tpurtell/local-ai/agent-sudo
+   sudo "$(brew --prefix)/bin/agent-sudo-setup" --enroll https://agent-sudo.your-tailnet.ts.net <token>
    ```
 
-4. **Point an agent at it**, in the agent's environment only:
+   The setup step verifies the bundle and installs it root-owned in `/usr/local`,
+   because a setuid binary must never run from a prefix your agents can write. It never
+   touches `/usr/bin/sudo`. After `brew upgrade agent-sudo`, run the setup line again
+   without arguments. Hosts without Homebrew can use the `curl` line the sheet also
+   shows.
+
+4. **Teach your agents**, as your own user:
 
    ```sh
-   agent-sudo-hostd shim install          # ~/.agent-tools/sudo -> agent-sudo
-   export PATH="$HOME/.agent-tools:$PATH"
+   agent-sudo-hostd skill install    # Claude Code, Codex, Gemini, Cursor, and 19 more
    ```
 
-   Optionally add [`skills/agent-sudo`](skills/agent-sudo/SKILL.md) so agents explain
-   themselves with `--agent-context`.
+   Agents with the skill call `agent-sudo --agent-context "why" …`. For agents without
+   it, `agent-sudo-hostd shim install` makes plain `sudo` go through agent-sudo in
+   that agent's environment. See [docs/AGENTS.md](docs/AGENTS.md).
 
-The full walkthrough, including the nginx profile and arm64 builds, is in
-[docs/DEPLOY.md](docs/DEPLOY.md).
+The full walkthrough is in [docs/DEPLOY.md](docs/DEPLOY.md).
 
 <p align="center">
   <img src="docs/images/desktop-activity.png" width="820" alt="Activity timeline on the desktop">
@@ -94,6 +103,8 @@ The full walkthrough, including the nginx profile and arm64 builds, is in
 | | |
 | --- | --- |
 | [docs/DEPLOY.md](docs/DEPLOY.md) | Running the service, enrolling hosts, agent setup |
+| [docs/AGENTS.md](docs/AGENTS.md) | The agent skill and where 23 coding agents read it |
+| [docs/RELEASING.md](docs/RELEASING.md) | Cutting a release: source tarball, images, Homebrew bottles |
 | [docs/ADVISOR.md](docs/ADVISOR.md) | Decision models, delegations, calibration |
 | [docs/SECURITY.md](docs/SECURITY.md) | Threat model, invariants, step-up rules |
 | [docs/PROTOCOL.md](docs/PROTOCOL.md) | Socket, host API and push formats |

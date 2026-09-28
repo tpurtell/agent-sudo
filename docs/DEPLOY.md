@@ -6,12 +6,35 @@ Three pieces: the **approval service** (one per fleet, in Docker), **hostd** plu
 ## 1. The approval service
 
 Passkeys and Web Push need a stable HTTPS origin with a publicly trusted certificate.
-The service does not need to be reachable from the Internet. Pick a front door:
+The service does not need to be reachable from the Internet.
 
-### Tailscale (recommended)
+### Generate the deployment
 
-The sidecar joins your tailnet and serves `https://<TS_HOSTNAME>.<tailnet>.ts.net`
-with an automatic Let's Encrypt certificate. Only tailnet devices can reach it.
+`agent-sudo-service init` asks a few questions and writes a ready folder
+(`docker-compose.yml`, `service.toml`, `.env` with mode 600, and the proxy config),
+validated by the service's own parser. It can test your decision model live.
+
+```sh
+brew install tpurtell/local-ai/agent-sudo
+agent-sudo-service init agent-sudo          # interactive; every answer also has a flag, --yes for scripts
+cd agent-sudo && docker compose up -d
+docker compose logs service | grep setup    # the one-time setup link
+```
+
+Without Homebrew, run the same command from the image:
+
+```sh
+docker run --rm -it --user "$(id -u):$(id -g)" -v "$PWD:/out" \
+  ghcr.io/tpurtell/agent-sudo-service init /out/agent-sudo
+```
+
+`.env` sets `COMPOSE_PROFILES`, so `docker compose up -d` starts the right front door.
+The image is published for amd64 and arm64 under one name; Docker picks the right one.
+
+### Front door: Tailscale (recommended)
+
+The sidecar joins your tailnet and serves `https://<name>.<tailnet>.ts.net` with an
+automatic Let's Encrypt certificate. Only tailnet devices can reach it.
 
 1. In the Tailscale admin console enable **MagicDNS** and **HTTPS certificates**.
 2. Declare a tag for the service in your tailnet policy file, so the device belongs to
@@ -22,35 +45,22 @@ with an automatic Let's Encrypt certificate. Only tailnet devices can reach it.
    ```
 
 3. Create an auth key under Settings → Keys → **Generate auth key**: not reusable, not
-   ephemeral, pre-approved, with the tag `tag:agent-sudo`. The key is only used for the
-   first start, so its expiry doesn't matter afterwards.
-4. Choose the hostname (`TS_HOSTNAME`) now. It becomes part of the service's address,
-   and passkeys are tied to that address for good.
-5. Configure and start:
+   ephemeral, pre-approved, with the tag `tag:agent-sudo`. `init` asks for it. It is
+   only used for the first start.
 
-   ```sh
-   cd deploy/service
-   cp .env.example .env                    # TS_AUTHKEY, TS_HOSTNAME, public URL, model
-   cp service.example.toml service.toml
-   docker compose --profile tailscale up -d
-   ```
+`init` detects your tailnet's DNS suffix when `tailscale` is installed locally. The
+machine name you choose becomes the service's address, and passkeys are tied to that
+address for good. The device's identity is kept in the `tailscale` volume; back it up
+with `data`, and never commit it anywhere.
 
-6. Open the setup link from the service log: `docker compose logs service | grep setup`.
-
-The device's identity is kept in the `tailscale` volume, so restarts and upgrades don't
-need the key again; you can remove it from `.env` once the device appears. Back that
-volume up with `data`, and never commit it anywhere.
-
-**Without an auth key.** Leave `TS_AUTHKEY` empty and the sidecar prints a login link
+**Without an auth key.** Leave it empty in `init` and the sidecar prints a login link
 (`docker compose logs tailscale | grep login.tailscale.com`). Approve it, then choose
-**Disable key expiry** for the device under Machines, or it is logged out after about
-180 days.
+**Disable key expiry** for the device under Machines.
 
-### Your own certificate (nginx)
+### Front door: your own certificate (nginx)
 
-Put `fullchain.pem` and `privkey.pem` where `TLS_CERT`/`TLS_KEY` point and run
-`docker compose --profile nginx up -d`. Set `public_url` to the exact
-`https://host:port` browsers will use.
+Choose nginx in `init`, give the exact `https://host:port` browsers will use, and point
+it at `fullchain.pem` and `privkey.pem`.
 
 ### Configuration notes
 
@@ -67,32 +77,36 @@ Put `fullchain.pem` and `privkey.pem` where `TLS_CERT`/`TLS_KEY` point and run
 
 ## 2. Hosts
 
-Build the host binaries for the host's architecture (Debian bookworm glibc, so they
-run on Ubuntu 22.04 and later):
+Hosts → Add in the web app mints a one-time token and shows the commands. With
+Homebrew (Linux amd64 and arm64 bottles):
 
 ```sh
-docker build --target host-dist --output dist .                          # this machine's arch
-docker buildx build --platform linux/arm64 --target host-dist --output dist-arm64 .
+brew install tpurtell/local-ai/agent-sudo
+sudo "$(brew --prefix)/bin/agent-sudo-setup" --enroll https://agent-sudo.example.ts.net <token>
 ```
 
-Cross-architecture builds need QEMU binfmt or a native builder (for example a buildx
-builder on an arm64 machine).
+`agent-sudo` is setuid root and its relay runs as root, so neither may run from the
+Homebrew prefix: your user, and every agent you run, can write there. The setup step
+unpacks the host bundle, checks that the binaries use the system loader, embed no
+library paths and need glibc 2.39 or older, and installs them root-owned:
+`/usr/local/bin/agent-sudo` (setuid), `/usr/local/sbin/agent-sudo-hostd`, and a
+hardened systemd unit. It never touches `/usr/bin/sudo`; humans keep the normal sudo.
 
-On each host, as root:
+After `brew upgrade agent-sudo`, run `sudo "$(brew --prefix)/bin/agent-sudo-setup"`
+again. It keeps the host's enrollment and restarts the relay. `--uninstall` removes
+the binaries and unit; `--check` verifies the bundle without root.
+
+**Without Homebrew**, the sheet's second command downloads the bundle the service
+carries for each architecture, verifies it against the service's `SHA256SUMS`, and runs
+the same install:
 
 ```sh
-./install.sh --enroll https://agent-sudo.example.ts.net <token-from-the-UI>
+curl -fsSL https://agent-sudo.example.ts.net/install.sh | sudo sh -s -- --token <token>
 ```
 
-This installs `/usr/local/bin/agent-sudo` (setuid root), `/usr/local/sbin/agent-sudo-hostd`,
-and a hardened systemd unit, then registers the host key. It never touches
-`/usr/bin/sudo`: humans keep the normal sudo.
-
-Requirements: `/etc/sudoers` (the policy ceiling) and a PAM service named `sudo`
-(present wherever sudo or sudo-rs is installed). On Debian and Ubuntu the binary is
-built with `sudo-i` as the PAM service for `sudo -i`, like the distro's sudo.
-
-`agent-sudo-hostd status` checks configuration and connectivity.
+Either way requires `/etc/sudoers` (the policy ceiling) and a PAM service named `sudo`,
+present wherever sudo or sudo-rs is installed. `agent-sudo-hostd status` checks
+configuration and connectivity.
 
 ### What hosts send
 
@@ -103,16 +117,13 @@ for commands sudoers denies or allows without a password.
 
 ## 3. Agents
 
-In each agent's environment (not your own shell):
+As your own user (not root):
 
 ```sh
-agent-sudo-hostd shim install
-export PATH="$HOME/.agent-tools:$PATH"
+agent-sudo-hostd skill install       # the skill for every coding agent found; see AGENTS.md
+agent-sudo-hostd shim install        # optional: makes plain `sudo` mean agent-sudo
+export PATH="$HOME/.agent-tools:$PATH"   # in the agent's environment only
 ```
-
-For Claude Code, putting the `export` in the environment that launches `claude` is
-enough. The optional skill in `skills/agent-sudo/` teaches agents to add
-`--agent-context "why"` and to wait patiently for approval.
 
 ## 4. Devices
 

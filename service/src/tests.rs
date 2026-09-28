@@ -1,0 +1,600 @@
+//! Integration tests: the real router, an in-memory database, signed host calls,
+//! cookie-authenticated browser calls, and a mock decision model.
+
+use std::time::Duration;
+
+use agent_sudo_protocol::api::*;
+use agent_sudo_protocol::signing;
+use axum::body::Body;
+use axum::http::{Request, StatusCode};
+use ed25519_dalek::SigningKey;
+use http_body_util::BodyExt;
+use serde_json::{Value, json};
+use tower::ServiceExt;
+
+use crate::config::ServiceConfig;
+use crate::state::Shared;
+
+const ORIGIN: &str = "https://sudo.test";
+
+struct Harness {
+    state: Shared,
+    app: axum::Router,
+    host_id: String,
+    key: SigningKey,
+    cookie: String,
+    csrf: String,
+}
+
+fn config(extra: &str) -> ServiceConfig {
+    let cfg: ServiceConfig = toml::from_str(&format!(
+        "public_url = \"{ORIGIN}\"\n[push]\nenabled = false\n{extra}"
+    ))
+    .unwrap();
+    cfg.validate().unwrap();
+    cfg
+}
+
+async fn call(app: &axum::Router, req: Request<Body>) -> (StatusCode, Value) {
+    let resp = app.clone().oneshot(req).await.unwrap();
+    let status = resp.status();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
+}
+
+impl Harness {
+    async fn new(extra: &str) -> Harness {
+        let state = crate::build_state(config(extra), crate::db::Db::memory().unwrap()).unwrap();
+        let app = crate::app(state.clone());
+        // An admin with a session that has recently used a passkey.
+        let user =
+            crate::auth::create_user(&state, "tj", "TJ", "admin", Some("correct horse battery"))
+                .unwrap();
+        let s = crate::auth::create_session(
+            &state,
+            &user,
+            None,
+            "Mozilla/5.0 (iPhone)",
+            "passkey",
+            true,
+        )
+        .unwrap();
+        let csrf: String = state
+            .db
+            .lock()
+            .query_row("SELECT csrf FROM web_sessions", [], |r| r.get(0))
+            .unwrap();
+        let mut h = Harness {
+            state,
+            app,
+            host_id: String::new(),
+            key: signing::generate_key(),
+            cookie: format!("__Host-asudo={}", s.token),
+            csrf,
+        };
+        let (status, token) = h
+            .web(
+                "POST",
+                "/api/hosts/tokens",
+                json!({"name": "moa", "groups": ["sparks"]}),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{token}");
+        let (status, enrolled) = call(
+            &h.app,
+            Request::post("/api/v1/enroll")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "token": token["token"],
+                        "hostname": "moa.local",
+                        "public_key": signing::encode_public_key(&h.key.verifying_key()),
+                        "hostd_version": "test"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{enrolled}");
+        assert_eq!(enrolled["name"], "moa");
+        h.host_id = enrolled["host_id"].as_str().unwrap().to_string();
+        h
+    }
+
+    fn signed(&self, method: &str, path: &str, body: Option<Value>) -> Request<Body> {
+        let bytes = body.map(|b| b.to_string().into_bytes()).unwrap_or_default();
+        let time = crate::util::now_secs();
+        let nonce = signing::new_nonce();
+        let msg = signing::canonical(method, path, &self.host_id, time, &nonce, &bytes);
+        Request::builder()
+            .method(method)
+            .uri(path)
+            .header("content-type", "application/json")
+            .header(signing::HEADER_HOST, &self.host_id)
+            .header(signing::HEADER_TIME, time.to_string())
+            .header(signing::HEADER_NONCE, nonce)
+            .header(signing::HEADER_SIGNATURE, signing::sign(&self.key, &msg))
+            .body(Body::from(bytes))
+            .unwrap()
+    }
+
+    async fn host(&self, method: &str, path: &str, body: Option<Value>) -> (StatusCode, Value) {
+        call(&self.app, self.signed(method, path, body)).await
+    }
+
+    async fn web(&self, method: &str, path: &str, body: Value) -> (StatusCode, Value) {
+        let mut req = Request::builder()
+            .method(method)
+            .uri(path)
+            .header("cookie", &self.cookie)
+            .header("origin", ORIGIN)
+            .header("x-csrf-token", &self.csrf);
+        let body = if method == "GET" {
+            Body::empty()
+        } else {
+            req = req.header("content-type", "application/json");
+            Body::from(body.to_string())
+        };
+        call(&self.app, req.body(body).unwrap()).await
+    }
+
+    async fn submit(
+        &self,
+        cmd: &str,
+        args: &[&str],
+        tweak: impl FnOnce(&mut RequestEnvelope),
+    ) -> (StatusCode, Value) {
+        let mut env = crate::policy::tests::env(cmd, args);
+        env.client_request_id = ulid::Ulid::new().to_string();
+        tweak(&mut env);
+        self.host(
+            "POST",
+            "/api/v1/requests",
+            Some(serde_json::to_value(&env).unwrap()),
+        )
+        .await
+    }
+}
+
+#[tokio::test]
+async fn full_approval_flow_with_grant_reuse() {
+    let h = Harness::new("").await;
+    let (status, sub) = h
+        .submit("/usr/bin/apt", &["install", "-y", "jq"], |_| {})
+        .await;
+    assert_eq!(status, StatusCode::OK, "{sub}");
+    assert_eq!(sub["state"], "pending");
+    assert!(
+        sub["url"]
+            .as_str()
+            .unwrap()
+            .starts_with("https://sudo.test/r/req_")
+    );
+    let id = sub["id"].as_str().unwrap().to_string();
+
+    // The UI sees it.
+    let (_, list) = h
+        .web("GET", "/api/requests?view=pending", Value::Null)
+        .await;
+    assert_eq!(list["items"].as_array().unwrap().len(), 1);
+    assert_eq!(list["items"][0]["class"]["name"], "packages");
+    let version = list["items"][0]["version"].as_i64().unwrap();
+
+    // A host long-poll wakes up when the approver decides.
+    let waiter = {
+        let app = h.app.clone();
+        let req = h.signed(
+            "GET",
+            &format!("/api/v1/requests/{id}/decision?wait=10"),
+            None,
+        );
+        tokio::spawn(async move { call(&app, req).await })
+    };
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let (status, decided) = h
+        .web(
+            "POST",
+            &format!("/api/requests/{id}/decision"),
+            json!({"version": version, "decision": "approve",
+                   "scope": {"command": "exact", "hosts": "group", "requester": "session", "ttl_minutes": 30}}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{decided}");
+    assert_eq!(decided["state"], "approved");
+    let (status, waited) = tokio::time::timeout(Duration::from_secs(5), waiter)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(waited["state"], "approved");
+    assert_eq!(waited["decision"]["via"], "user");
+    assert_eq!(waited["decision"]["refresh_timestamp"], false);
+
+    // A stale second decision is refused.
+    let (status, _) = h
+        .web(
+            "POST",
+            &format!("/api/requests/{id}/decision"),
+            json!({"version": version, "decision": "deny"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+
+    // The same command from the same session is now approved by the grant, immediately.
+    let (_, again) = h
+        .submit("/usr/bin/apt", &["install", "-y", "jq"], |_| {})
+        .await;
+    assert_eq!(again["state"], "approved");
+    assert_eq!(again["decision"]["via"], "grant");
+    // A different command, or a different session, still asks.
+    let (_, other) = h
+        .submit("/usr/bin/apt", &["install", "-y", "curl"], |_| {})
+        .await;
+    assert_eq!(other["state"], "pending");
+    let (_, other_session) = h
+        .submit("/usr/bin/apt", &["install", "-y", "jq"], |e| {
+            e.session.fingerprint = "b:99:1".into()
+        })
+        .await;
+    assert_eq!(other_session["state"], "pending");
+
+    let (_, grants) = h.web("GET", "/api/grants", Value::Null).await;
+    assert_eq!(grants["items"][0]["uses"], 1);
+}
+
+#[tokio::test]
+async fn idempotent_submission_and_nonblocking() {
+    let h = Harness::new("").await;
+    let mut env = crate::policy::tests::env("/usr/bin/systemctl", &["restart", "docker"]);
+    env.client_request_id = "fixed-id".into();
+    let body = serde_json::to_value(&env).unwrap();
+    let (_, a) = h.host("POST", "/api/v1/requests", Some(body.clone())).await;
+    let (_, b) = h.host("POST", "/api/v1/requests", Some(body)).await;
+    assert_eq!(a["id"], b["id"]);
+
+    let (_, n) = h
+        .submit("/usr/bin/systemctl", &["restart", "nginx"], |e| {
+            e.nonblocking = true
+        })
+        .await;
+    assert_eq!(n["state"], "expired");
+    let (_, list) = h.web("GET", "/api/requests", Value::Null).await;
+    assert_eq!(
+        list["items"].as_array().unwrap().len(),
+        1,
+        "sudo -n misses are hidden by default"
+    );
+}
+
+#[tokio::test]
+async fn cancellation_and_expiry() {
+    let h = Harness::new("").await;
+    let (_, sub) = h.submit("/usr/bin/apt", &["update"], |_| {}).await;
+    let id = sub["id"].as_str().unwrap();
+    let (status, c) = h
+        .host(
+            "POST",
+            &format!("/api/v1/requests/{id}/cancel"),
+            Some(json!({"reason": "password"})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(c["state"], "withdrawn");
+
+    let (_, sub) = h
+        .submit("/usr/bin/apt", &["upgrade"], |e| e.timeout_secs = 0)
+        .await;
+    let id = sub["id"].as_str().unwrap();
+    crate::engine::expire_due(&h.state).unwrap();
+    let (_, r) = h
+        .web("GET", &format!("/api/requests/{id}"), Value::Null)
+        .await;
+    assert_eq!(r["state"], "expired");
+}
+
+#[tokio::test]
+async fn host_signatures_are_enforced() {
+    let h = Harness::new("").await;
+    // Replay the exact same signed request.
+    let req = h.signed(
+        "POST",
+        "/api/v1/heartbeat",
+        Some(json!({"hostd_version": "t", "hostname": "moa"})),
+    );
+    let (parts, body) = req.into_parts();
+    let bytes = body.collect().await.unwrap().to_bytes();
+    let first = Request::from_parts(parts.clone(), Body::from(bytes.clone()));
+    let (status, hb) = call(&h.app, first).await;
+    assert_eq!(status, StatusCode::OK, "{hb}");
+    assert_eq!(hb["groups"], json!(["sparks"]));
+    let (status, _) = call(
+        &h.app,
+        Request::from_parts(parts.clone(), Body::from(bytes)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "replay must fail");
+
+    // Tampered body.
+    let req = h.signed(
+        "POST",
+        "/api/v1/heartbeat",
+        Some(json!({"hostd_version": "t", "hostname": "moa"})),
+    );
+    let (parts, _) = req.into_parts();
+    let (status, _) = call(
+        &h.app,
+        Request::from_parts(
+            parts,
+            Body::from("{\"hostd_version\":\"x\",\"hostname\":\"evil\"}"),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // Unknown key.
+    let mut other = Harness::new("").await;
+    other.key = signing::generate_key();
+    let (status, _) = other
+        .host(
+            "POST",
+            "/api/v1/heartbeat",
+            Some(json!({"hostd_version": "t", "hostname": "moa"})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // Revoked host.
+    let (status, _) = h
+        .web(
+            "POST",
+            &format!("/api/hosts/{}/revoke", h.host_id),
+            json!({}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = h.submit("/usr/bin/apt", &["update"], |_| {}).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn browser_protections() {
+    let h = Harness::new("").await;
+    let (_, sub) = h.submit("/usr/bin/apt", &["update"], |_| {}).await;
+    let id = sub["id"].as_str().unwrap();
+    let decide = |csrf: &str, origin: &str| {
+        Request::post(format!("/api/requests/{id}/decision"))
+            .header("cookie", &h.cookie)
+            .header("origin", origin)
+            .header("x-csrf-token", csrf)
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({"version": 1, "decision": "approve"}).to_string(),
+            ))
+            .unwrap()
+    };
+    let (status, _) = call(&h.app, decide("wrong", ORIGIN)).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _) = call(&h.app, decide(&h.csrf, "https://evil.example")).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _) = call(
+        &h.app,
+        Request::get("/api/requests").body(Body::empty()).unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, _) = call(&h.app, decide(&h.csrf, ORIGIN)).await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn policy_blocks_grants_for_root_shells_and_requires_step_up() {
+    let h = Harness::new("").await;
+    let (_, sub) = h
+        .submit("/usr/bin/bash", &[], |e| e.launch = Launch::Login)
+        .await;
+    let id = sub["id"].as_str().unwrap();
+    let (_, r) = h
+        .web("GET", &format!("/api/requests/{id}"), Value::Null)
+        .await;
+    assert_eq!(r["class"]["name"], "root-shell");
+    let (status, err) = h
+        .web("POST", &format!("/api/requests/{id}/decision"),
+             json!({"version": 1, "decision": "approve", "scope": {"command": "executable", "ttl_minutes": 10}}))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{err}");
+    // Expire the strong authentication: a root shell now needs a fresh passkey.
+    h.state
+        .db
+        .lock()
+        .execute("UPDATE web_sessions SET strong_auth_at = 0", [])
+        .unwrap();
+    let (status, err) = h
+        .web(
+            "POST",
+            &format!("/api/requests/{id}/decision"),
+            json!({"version": 1, "decision": "approve"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(err["error"], "step_up_required");
+    // Denial never needs step-up.
+    let (status, _) = h
+        .web(
+            "POST",
+            &format!("/api/requests/{id}/decision"),
+            json!({"version": 1, "decision": "deny", "hard": true}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+/// A tiny OpenAI-compatible server that returns a canned assessment.
+async fn mock_model(risk: u8, decision: &'static str, relevance: f32) -> String {
+    use axum::routing::post;
+    let app = axum::Router::new().route(
+        "/v1/chat/completions",
+        post(move |axum::Json(body): axum::Json<Value>| async move {
+            // The prompt must carry the untrusted context and the delegation intent.
+            let state = body["messages"][1]["content"].as_str().unwrap_or_default().to_string();
+            assert!(state.contains("requester_supplied_UNTRUSTED"));
+            assert!(!state.contains("sk-live-secret-value-123456"), "secrets must be redacted");
+            let content = json!({
+                "risk": risk, "confidence": 0.9,
+                "dimensions": {"destructive": 0.05, "privilege_escape": 0.02, "persistence": 0.3,
+                               "credential_access": 0.0, "network_security": 0.0, "availability": 0.1, "unusual": 0.1},
+                "relevance": relevance,
+                "suggestion": {"decision": decision, "command": "exact", "hosts": "group", "requester": "session", "ttl_minutes": 30},
+                "summary": "Installs a named package.", "reasons": ["matches the intent"]
+            });
+            axum::Json(json!({"model": "mock", "choices": [{"message": {"content": content.to_string()}}]}))
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    format!("http://{addr}/v1")
+}
+
+#[tokio::test]
+async fn delegation_approves_within_limits_and_falls_back_otherwise() {
+    let url = mock_model(12, "approve", 0.9).await;
+    let h = Harness::new(&format!(
+        "[advisor]\nurl = \"{url}\"\nmodel = \"mock\"\nauto_assess = false\n"
+    ))
+    .await;
+
+    // First request: a human approves and delegates similar work.
+    let (_, sub) = h
+        .submit(
+            "/usr/bin/apt",
+            &["install", "-y", "nvidia-driver-580"],
+            |e| {
+                e.untrusted.context =
+                    Some("Installing drivers; token sk-live-secret-value-123456".into())
+            },
+        )
+        .await;
+    let id = sub["id"].as_str().unwrap();
+    let (status, d) = h
+        .web("POST", &format!("/api/requests/{id}/decision"), json!({
+            "version": 1, "decision": "approve",
+            "delegate": {"intent": "Install and configure NVIDIA drivers on the sparks", "ttl_minutes": 30, "hosts": "group", "requester": "user"}
+        }))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{d}");
+
+    // Next package install is approved by the delegation, synchronously.
+    let (_, auto) = h
+        .submit(
+            "/usr/bin/apt",
+            &["install", "-y", "nvidia-utils-580"],
+            |_| {},
+        )
+        .await;
+    assert_eq!(auto["state"], "approved", "{auto}");
+    assert_eq!(auto["decision"]["via"], "delegation");
+
+    // A root shell is never delegable: it waits for a human.
+    let (_, shell) = h.submit("/usr/bin/bash", &["-c", "id"], |_| {}).await;
+    assert_eq!(shell["state"], "pending");
+
+    // The kill switch stops automation immediately.
+    let (_, _) = h
+        .web(
+            "POST",
+            "/api/settings/automation",
+            json!({"enabled": false}),
+        )
+        .await;
+    let (_, manual) = h
+        .submit(
+            "/usr/bin/apt",
+            &["install", "-y", "nvidia-settings"],
+            |_| {},
+        )
+        .await;
+    assert_eq!(manual["state"], "pending");
+    let (_, _) = h
+        .web("POST", "/api/settings/automation", json!({"enabled": true}))
+        .await;
+
+    // Flagging an automated approval pauses the delegation.
+    let auto_id = auto["id"].as_str().unwrap();
+    let (status, _) = h
+        .web("POST", &format!("/api/requests/{auto_id}/flag"), json!({}))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, after) = h
+        .submit(
+            "/usr/bin/apt",
+            &["install", "-y", "nvidia-cuda-toolkit"],
+            |_| {},
+        )
+        .await;
+    assert_eq!(after["state"], "pending");
+    let (_, grants) = h.web("GET", "/api/grants", Value::Null).await;
+    let delegation = grants["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|g| g["kind"] == "delegation")
+        .unwrap();
+    assert!(delegation["paused_at"].is_i64());
+}
+
+#[tokio::test]
+async fn delegation_declines_high_risk_and_records_why() {
+    let url = mock_model(80, "approve", 0.9).await;
+    let h = Harness::new(&format!(
+        "[advisor]\nurl = \"{url}\"\nmodel = \"mock\"\nauto_assess = false\n"
+    ))
+    .await;
+    let (status, _) = h
+        .web("POST", "/api/delegations", json!({"intent": "Routine package maintenance", "ttl_minutes": 30, "hosts": "all", "requester": "any"}))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, sub) = h
+        .submit("/usr/bin/apt", &["install", "-y", "jq"], |_| {})
+        .await;
+    assert_eq!(sub["state"], "pending");
+    let (_, r) = h
+        .web(
+            "GET",
+            &format!("/api/requests/{}", sub["id"].as_str().unwrap()),
+            Value::Null,
+        )
+        .await;
+    let check = &r["assessment"]["delegation_check"];
+    assert_eq!(check["approved"], false);
+    assert!(check["reasons"].to_string().contains("risk 80"), "{check}");
+}
+
+#[tokio::test]
+async fn background_assessment_is_stored() {
+    let url = mock_model(20, "approve", 0.0).await;
+    let h = Harness::new(&format!("[advisor]\nurl = \"{url}\"\nmodel = \"mock\"\n")).await;
+    let (_, sub) = h
+        .submit("/usr/bin/systemctl", &["restart", "docker"], |_| {})
+        .await;
+    let id = sub["id"].as_str().unwrap().to_string();
+    for _ in 0..50 {
+        let (_, r) = h
+            .web("GET", &format!("/api/requests/{id}"), Value::Null)
+            .await;
+        if r["assessment"]["assessment"]["risk"].is_number() {
+            // Service control has an availability dimension but no floor; stays 20.
+            assert_eq!(r["assessment"]["assessment"]["risk"], 20);
+            assert_eq!(
+                r["assessment"]["assessment"]["suggestion"]["hosts"],
+                "group"
+            );
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("assessment never arrived");
+}

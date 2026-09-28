@@ -11,3 +11,6 @@ dist/
 .env
 .env.*
 !.env.example
+service/web/dist/
+test-results/
+playwright-report/

@@ -1,7 +1,51 @@
 [package]
 name = "agent-sudo-service"
+description = "Approval service for agent-sudo: requests, grants, passkeys, push, and decision assistance"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-publish = false
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "agent-sudo-service"
+path = "src/main.rs"
+
 [dependencies]
+agent-sudo-protocol.workspace = true
+aes-gcm = "0.10"
+anyhow.workspace = true
+argon2 = { version = "0.5", features = ["std"] }
+axum = { version = "0.8", features = ["http2", "json", "query", "tokio"] }
+base64.workspace = true
+clap.workspace = true
+ed25519-dalek.workspace = true
+futures-util = "0.3"
+getrandom.workspace = true
+hex.workspace = true
+hkdf = "0.12"
+mime_guess = "2"
+p256 = { version = "0.13", features = ["ecdh", "ecdsa", "pem"] }
+reqwest.workspace = true
+rusqlite = { version = "0.37", features = ["bundled"] }
+rust-embed = { version = "8", features = ["interpolate-folder-path"] }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+time.workspace = true
+tokio.workspace = true
+tokio-stream = { version = "0.1", features = ["sync"] }
+toml.workspace = true
+tower-http = { version = "0.6", features = ["compression-gzip", "compression-br", "set-header", "trace", "limit"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+ulid.workspace = true
+url = "2"
+regex = "1"
+webauthn-rs = { version = "0.5", features = ["conditional-ui"] }
+
+[dev-dependencies]
+tempfile = "3"
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"

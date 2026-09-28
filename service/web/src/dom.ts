@@ -158,6 +158,15 @@ export function minutesLabel(min: number): string {
   return Number.isInteger(hr) ? `${hr} hour${hr === 1 ? "" : "s"}` : `${hr.toFixed(1)} hours`;
 }
 
+/** Delegation lengths offered to approvers, in minutes; 0 means no expiry. */
+export const DELEGATION_DURATIONS: { value: string; label: string }[] = [
+  { value: "60", label: "1 hour" },
+  { value: "1440", label: "1 day" },
+  { value: "43200", label: "1 month" },
+  { value: "0", label: "Forever" },
+];
+export const DEFAULT_DELEGATION_MINUTES = 1440;
+
 export function clock(ms: number): string {
   return new Date(ms).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
 }

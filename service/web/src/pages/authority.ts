@@ -2,7 +2,7 @@
 
 import { api, currentSession, loadSession, onLive } from "../api";
 import { riskLevel } from "../components";
-import { duration, h, icon, timeAgo } from "../dom";
+import { DEFAULT_DELEGATION_MINUTES, DELEGATION_DURATIONS, duration, h, icon, timeAgo } from "../dom";
 import type { Mounted } from "../router";
 import type { GrantView, HostView } from "../types";
 import { action, confirmSheet, emptyState, field, loading, segmented, sheet, toast, toggle, busy } from "../ui";
@@ -72,7 +72,7 @@ function newDelegationSheet(hosts: HostView[], reload: () => void) {
   let scope: "all" | "group" | "host" = groups.length ? "group" : "all";
   let group = groups[0] ?? "";
   let host = hosts.find((x) => !x.revoked_at)?.id ?? "";
-  let ttl = 60;
+  let ttl = DEFAULT_DELEGATION_MINUTES;
   let maxRisk = 30;
   let notify = "each";
   sheet((close) => {
@@ -124,7 +124,7 @@ function newDelegationSheet(hosts: HostView[], reload: () => void) {
         field("Hosts", segmented([{ value: "group", label: "A group", disabled: !groups.length }, { value: "host", label: "One host" }, { value: "all", label: "All hosts" }], scope, (v) => { scope = v as typeof scope; syncScope(); })),
         groupField,
         hostField,
-        field("Duration", segmented([30, 60, 120, 240, 480].map((t) => ({ value: String(t), label: t < 60 ? `${t}m` : `${t / 60}h` })), String(ttl), (v) => (ttl = Number(v)))),
+        field("Duration", segmented(DELEGATION_DURATIONS, String(ttl), (v) => (ttl = Number(v)))),
         h("div", { class: "field" }, h("div", { class: "label row between" }, h("span", {}, "Highest risk it may approve"), riskLabel), risk),
         field("Notifications", segmented([{ value: "each", label: "Every approval" }, { value: "digest", label: "Summary" }, { value: "silent", label: "None" }], notify, (v) => (notify = v))),
         create,

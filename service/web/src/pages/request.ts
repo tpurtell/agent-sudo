@@ -15,7 +15,7 @@ import {
   stateIcon,
 } from "../components";
 import { type DecisionBody, needsStepUp, submitDecision } from "../decide";
-import { h, icon, minutesLabel, timeAgo, clock } from "../dom";
+import { h, icon, minutesLabel, timeAgo, clock, DELEGATION_DURATIONS, DEFAULT_DELEGATION_MINUTES } from "../dom";
 import { type Mounted, navigate } from "../router";
 import type { RequestView } from "../types";
 import { action, busy, confirmSheet, emptyState, field, segmented, toast, toggle, type Option } from "../ui";
@@ -95,7 +95,7 @@ function initialDraft(r: RequestView): Draft {
     ttl: TTL_CHOICES.filter((t) => t <= maxTtl).reduce((best, t) => (Math.abs(t - ttl) < Math.abs(best - ttl) ? t : best), TTL_CHOICES[0]!),
     delegate: false,
     intent: r.context ? r.context.slice(0, 300) : "",
-    delegateTtl: 30,
+    delegateTtl: DEFAULT_DELEGATION_MINUTES,
     delegateHosts: hasGroup ? "group" : "host",
     // Other hosts run other sessions, so multi-host delegations default to the user.
     delegateRequester: hasGroup ? "user" : "session",
@@ -398,7 +398,7 @@ function decisionBuilder(r: RequestView, d: Draft, save: (d: Draft) => void, rel
     { class: "delegate-box" },
     h("p", { class: "small" }, h("b", {}, "The model approves similar requests for you "), "while the work continues, within the limits below. Root shells, credentials, and changes to sudo always come back to you."),
     field("What work should it approve?", intent, "Your words, given to the model as the intent. Requests that don't fit come to you."),
-    field("For how long", segmented([15, 30, 60, 120, 240].map((t) => ({ value: String(t), label: t < 60 ? `${t}m` : `${t / 60}h` })), String(d.delegateTtl), (v) => update({ delegateTtl: Number(v) }), "Delegation duration")),
+    field("For how long", segmented(DELEGATION_DURATIONS, String(d.delegateTtl), (v) => update({ delegateTtl: Number(v) }), "Delegation duration")),
     field(
       "Where",
       segmented(

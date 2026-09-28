@@ -74,7 +74,8 @@ pub struct AutomationConfig {
     /// Master switch for delegated decisions. The UI kill switch is stored separately
     /// and can only further disable automation.
     pub enabled: bool,
-    /// Longest delegation an approver may create, in minutes.
+    /// Longest delegation an approver may create, in minutes. 0 means no limit, so
+    /// an approver may delegate with no expiry.
     pub max_ttl_minutes: u32,
     /// Most requests one delegation may approve before pausing.
     pub max_decisions: u32,
@@ -90,7 +91,7 @@ impl Default for AutomationConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            max_ttl_minutes: 8 * 60,
+            max_ttl_minutes: 0,
             max_decisions: 100,
             pause_after_declines: 5,
             forbidden_features: vec![

@@ -1,7 +1,7 @@
 // Settings: this device, passkeys, signed-in devices, account, users, policy, audit.
 
 import { api, currentSession, loadSession, onLive, strongAuthFresh } from "../api";
-import { copyText, h, icon, initials, isIOS, isStandalone, timeAgo, clock, dayLabel } from "../dom";
+import { copyText, h, icon, initials, isIOS, isStandalone, timeAgo, clock, dayLabel, minutesLabel } from "../dom";
 import { currentSubscription, disablePush, enablePush, pushSupport } from "../push";
 import { type Mounted, navigate } from "../router";
 import { action, busy, confirmSheet, field, loading, segmented, sheet, toast, errorMessage } from "../ui";
@@ -253,7 +253,7 @@ async function modelSection(): Promise<HTMLElement> {
       h("dt", {}, "Automation"),
       h("dd", {}, auto.configured ? (auto.enabled ? "on" : "switched off") : "disabled in configuration"),
       h("dt", {}, "Longest"),
-      h("dd", {}, `${auto.max_ttl_minutes / 60} hours, ${auto.max_decisions} approvals per delegation`),
+      h("dd", {}, `${auto.max_ttl_minutes ? `Up to ${minutesLabel(auto.max_ttl_minutes)}` : "No time limit"}, ${auto.max_decisions} approvals per delegation`),
       h("dt", {}, "Pauses after"),
       h("dd", {}, `${auto.pause_after_declines} declines in a row`),
       h("dt", {}, "Never automated"),

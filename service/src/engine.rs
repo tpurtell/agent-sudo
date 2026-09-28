@@ -341,7 +341,7 @@ pub fn request_view(state: &AppState, row: &RequestRow, detail: bool) -> Value {
         "created_at": row.created_at,
         "updated_at": row.updated_at,
         "deadline_at": row.deadline_at,
-        "host": host.as_ref().map(|h| json!({"id": h.id, "name": h.name, "groups": h.groups})),
+        "host": host.as_ref().map(|h| json!({"id": h.id, "name": h.name, "groups": h.groups, "default_group": default_group(state, h)})),
         "user": env.user.name,
         "target": env.target.user,
         "target_uid": env.target.uid,
@@ -1063,6 +1063,8 @@ fn session_scope() -> String {
 #[derive(Debug, Clone, Deserialize)]
 pub struct DelegateInput {
     pub intent: String,
+    /// 0 means no expiry (subject to `automation.max_ttl_minutes`).
+    #[serde(default)]
     pub ttl_minutes: u32,
     #[serde(default = "host_scope")]
     pub hosts: String,
@@ -1097,14 +1099,30 @@ pub struct DecideInput {
     pub delegate: Option<DelegateInput>,
 }
 
-fn host_scope_for(hosts: &str, groups: &[String], host: &HostRow) -> ApiResult<HostScope> {
+/// The group a "group" scope means by default: the host's smallest group. A group
+/// that every host shares (say "all") would silently widen a "group" approval to the
+/// whole fleet, so the most specific one wins.
+pub fn default_group(state: &AppState, host: &HostRow) -> Option<String> {
+    let all = hosts(state).unwrap_or_default();
+    host.groups
+        .iter()
+        .min_by_key(|g| all.iter().filter(|h| h.groups.contains(g)).count())
+        .cloned()
+}
+
+fn host_scope_for(
+    state: &AppState,
+    hosts: &str,
+    groups: &[String],
+    host: &HostRow,
+) -> ApiResult<HostScope> {
     Ok(match hosts {
         "host" => HostScope::Host {
             host_id: host.id.clone(),
         },
         "group" => {
             let groups: Vec<String> = if groups.is_empty() {
-                host.groups.clone()
+                default_group(state, host).into_iter().collect()
             } else {
                 groups.to_vec()
             };
@@ -1229,7 +1247,7 @@ pub fn decide(state: &Shared, session: &Session, id: &str, input: DecideInput) -
         }
         let spec = GrantSpec {
             command,
-            hosts: host_scope_for(&scope.hosts, &scope.groups, &host)?,
+            hosts: host_scope_for(state, &scope.hosts, &scope.groups, &host)?,
             requester: requester_scope_for(&scope.requester, env)?
                 .ok_or_else(|| ApiError::bad_request("Grants need a session or user scope."))?,
             target_uid: env.target.uid,
@@ -1239,10 +1257,7 @@ pub fn decide(state: &Shared, session: &Session, id: &str, input: DecideInput) -
             chdir: env.chdir.clone(),
             env: env.env.clone(),
         };
-        let label = policy::display_command(env)
-            .chars()
-            .take(120)
-            .collect::<String>();
+        let label = grant_label(env, &spec.command);
         grant_new = Some((new_id("grt"), label, spec, ttl));
     }
 
@@ -1349,7 +1364,7 @@ pub fn decide(state: &Shared, session: &Session, id: &str, input: DecideInput) -
             &session.user.name,
             "delegation.created",
             Some(&d.id),
-            json!({"spec": d.spec, "ttl_minutes": d.ttl, "device": session.device_label, "request": row.id}),
+            json!({"spec": d.spec, "ttl_minutes": (d.ttl > 0).then_some(d.ttl), "device": session.device_label, "request": row.id}),
         );
     }
     audit::record(
@@ -1386,6 +1401,21 @@ pub fn decide(state: &Shared, session: &Session, id: &str, input: DecideInput) -
     Ok(request_view(state, &updated, true))
 }
 
+/// What a grant covers, in command form: the label must not suggest a grant is
+/// narrower than it is.
+fn grant_label(env: &RequestEnvelope, command: &CommandScope) -> String {
+    let mut shown = env.clone();
+    shown.argv = command.argv.clone();
+    let line = policy::display_command(&shown);
+    let line = match command.kind {
+        CommandMatch::Exact => line,
+        CommandMatch::Prefix => format!("{line} …"),
+        CommandMatch::Executable => format!("{line} (any arguments)"),
+        CommandMatch::Any => "any command".into(),
+    };
+    line.chars().take(120).collect()
+}
+
 fn scope_words(scope: &ScopeInput) -> String {
     let what = match scope.command.as_str() {
         "exact" => "this command",
@@ -1408,6 +1438,7 @@ pub struct PreparedDelegation {
     pub id: String,
     pub label: String,
     pub spec: DelegationSpec,
+    /// Minutes; 0 means no expiry.
     pub ttl: u32,
     pub max_uses: u32,
     pub from_request: Option<String>,
@@ -1429,7 +1460,12 @@ pub fn prepare_delegation(
         ));
     }
     let auto = &state.cfg.policy.automation;
-    let ttl = input.ttl_minutes.clamp(1, auto.max_ttl_minutes);
+    // 0 means no expiry; the operator's `max_ttl_minutes` (0 = none) caps both.
+    let ttl = match (input.ttl_minutes, auto.max_ttl_minutes) {
+        (0, max) => max,
+        (t, 0) => t,
+        (t, max) => t.min(max),
+    };
     let requester = match (from, input.requester.as_str()) {
         (_, "any") => None,
         (Some(row), r) => requester_scope_for(r, &row.envelope)?,
@@ -1462,7 +1498,7 @@ pub fn prepare_delegation(
     limits.max_risk = limits.max_risk.min(60);
     let spec = DelegationSpec {
         intent: intent.chars().take(600).collect(),
-        hosts: host_scope_for(&input.hosts, &input.groups, host)?,
+        hosts: host_scope_for(state, &input.hosts, &input.groups, host)?,
         requester,
         target_uids: from
             .map(|r| vec![r.envelope.target.uid])
@@ -1504,7 +1540,7 @@ fn insert_delegation(
             session.user.name,
             d.from_request,
             d.created_at,
-            d.created_at + d.ttl as i64 * 60_000,
+            (d.ttl > 0).then(|| d.created_at + d.ttl as i64 * 60_000),
             d.max_uses as i64
         ],
     )?;
@@ -1525,7 +1561,7 @@ pub fn create_delegation(
         &session.user.name,
         "delegation.created",
         Some(&d.id),
-        json!({"spec": d.spec, "ttl_minutes": d.ttl, "device": session.device_label}),
+        json!({"spec": d.spec, "ttl_minutes": (d.ttl > 0).then_some(d.ttl), "device": session.device_label}),
     );
     state.emit(Event::Grants);
     Ok((d.id, d.spec))

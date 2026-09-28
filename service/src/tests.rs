@@ -907,3 +907,74 @@ async fn serves_the_installer_and_host_binaries() {
     assert_eq!(get("/dist/riscv/agent-sudo").await.0, StatusCode::NOT_FOUND);
     assert_eq!(get("/dist/amd64/agent-sudo").await.0, StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn group_scope_means_the_smallest_group() {
+    let h = Harness::new("").await;
+    // Every host is in "all"; moa is also in "sparks". "Group" must not mean the fleet.
+    {
+        let db = h.state.db.lock();
+        db.execute(
+            "UPDATE hosts SET groups_json = '[\"all\",\"sparks\"]' WHERE id = ?1",
+            [&h.host_id],
+        )
+        .unwrap();
+        for (id, name) in [("hst_a", "raptor"), ("hst_b", "aviary")] {
+            db.execute(
+                "INSERT INTO hosts (id, name, hostname, public_key, groups_json, created_at) VALUES (?1, ?2, ?2, 'k', '[\"all\"]', 0)",
+                [id, name],
+            )
+            .unwrap();
+        }
+    }
+    let (_, sub) = h.submit("/usr/bin/apt", &["update"], |_| {}).await;
+    let id = sub["id"].as_str().unwrap();
+    let (_, r) = h
+        .web("GET", &format!("/api/requests/{id}"), Value::Null)
+        .await;
+    assert_eq!(r["host"]["default_group"], "sparks");
+    let (status, d) = h
+        .web("POST", &format!("/api/requests/{id}/decision"),
+             json!({"version": 1, "decision": "approve", "scope": {"command": "executable", "hosts": "group", "requester": "user", "ttl_minutes": 30}}))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{d}");
+    let (_, grants) = h.web("GET", "/api/grants", Value::Null).await;
+    let g = &grants["items"][0];
+    assert_eq!(g["spec"]["hosts"]["groups"], json!(["sparks"]), "{g}");
+    // The label says the grant covers any arguments.
+    assert_eq!(g["label"], "/usr/bin/apt (any arguments)");
+}
+
+#[tokio::test]
+async fn delegations_can_last_forever() {
+    let url = mock_model(10, "approve", 0.9).await;
+    let h = Harness::new(&format!(
+        "[advisor]\nurl = \"{url}\"\nmodel = \"mock\"\nauto_assess = false\n"
+    ))
+    .await;
+    let (status, created) = h
+        .web("POST", "/api/delegations", json!({"intent": "Routine package maintenance", "ttl_minutes": 0, "hosts": "all", "requester": "any"}))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    let (_, month) = h
+        .web("POST", "/api/delegations", json!({"intent": "Routine package maintenance", "ttl_minutes": 43200, "hosts": "all", "requester": "any"}))
+        .await;
+    let (_, grants) = h.web("GET", "/api/grants", Value::Null).await;
+    let find = |id: &Value| {
+        grants["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|g| g["id"] == *id)
+            .cloned()
+            .unwrap()
+    };
+    assert!(find(&created["id"])["expires_at"].is_null());
+    let m = find(&month["id"]);
+    let days = (m["expires_at"].as_i64().unwrap() - m["created_at"].as_i64().unwrap()) / 86_400_000;
+    assert_eq!(days, 30);
+    let (_, sub) = h
+        .submit("/usr/bin/apt", &["install", "-y", "jq"], |_| {})
+        .await;
+    assert_eq!(sub["state"], "approved", "{sub}");
+}

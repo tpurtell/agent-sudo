@@ -34,7 +34,7 @@ builtin_classes = true                 # packages, services, root shells, creden
 
 [policy.automation]
 enabled = true                         # delegations are possible, never created automatically
-max_ttl_minutes = 480
+max_ttl_minutes = 0                    # longest delegation in minutes; 0 lets approvers pick "Forever"
 max_decisions = 100
 pause_after_declines = 5
 

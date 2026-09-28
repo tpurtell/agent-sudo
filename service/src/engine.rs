@@ -712,20 +712,42 @@ fn claim_delegation_use(
     let per_day = spec
         .per_day
         .unwrap_or(state.cfg.policy.automation.max_decisions_per_day);
-    if per_day > 0 {
-        let used: i64 = state.db.lock().query_row(
-            "SELECT COUNT(*) FROM requests WHERE delegation_id = ?1 AND state = 'approved'
-               AND decided_at > ?2 AND json_extract(decision_json, '$.decision.via') = 'delegation'",
-            params![g.id, now_ms() - 86_400_000],
-            |r| r.get(0),
-        )?;
-        if used >= per_day as i64 {
-            return Ok(Some(format!(
-                "it already approved {per_day} requests in the last 24 hours"
-            )));
+    let now = now_ms();
+    // Count and claim under one lock, so concurrent requests can't both take the
+    // last approval of the day.
+    let claimed = {
+        let db = state.db.lock();
+        if per_day > 0 {
+            let used: i64 = db.query_row(
+                "SELECT COUNT(*) FROM requests WHERE delegation_id = ?1 AND state = 'approved'
+                   AND decided_at > ?2 AND json_extract(decision_json, '$.decision.via') = 'delegation'",
+                params![g.id, now - 86_400_000],
+                |r| r.get(0),
+            )?;
+            if used >= per_day as i64 {
+                return Ok(Some(format!(
+                    "it already approved {per_day} requests in the last 24 hours"
+                )));
+            }
         }
-    }
-    Ok((!claim_use(state, g)?).then(|| "it stopped while the model was deciding".into()))
+        let changed = db.execute(
+            "UPDATE grants SET uses = uses + 1, last_used_at = ?1
+             WHERE id = ?2 AND revoked_at IS NULL AND paused_at IS NULL
+               AND (expires_at IS NULL OR expires_at > ?1)
+               AND (max_uses IS NULL OR uses < max_uses)",
+            params![now, g.id],
+        )?;
+        if changed == 1 {
+            db.execute(
+                "UPDATE grants SET paused_at = ?1, pause_reason = 'reached its approval limit'
+                 WHERE id = ?2 AND paused_at IS NULL AND max_uses IS NOT NULL AND uses >= max_uses",
+                params![now, g.id],
+            )?;
+        }
+        changed == 1
+    };
+    state.emit(Event::Grants);
+    Ok((!claimed).then(|| "it stopped while the model was deciding".into()))
 }
 
 pub fn grant_summary(state: &AppState, g: &GrantRow) -> String {
@@ -854,7 +876,10 @@ async fn evaluate_delegations(
     };
 
     let mut winner: Option<GrantRow> = None;
-    for (g, spec) in &candidates {
+    // Whether the narrowest rule turned the request away on the model's judgement or
+    // its limits, as opposed to its budget, the kill switch or a model failure.
+    let mut narrowest_verdict_declined = false;
+    for (i, (g, spec)) in candidates.iter().enumerate() {
         let relevance = stored
             .assessment
             .as_ref()
@@ -870,6 +895,9 @@ async fn evaluate_delegations(
             (_, Some(f)) => vec![f.clone()],
             _ => vec!["a narrower delegation approved it".into()],
         };
+        if i == 0 && failure.is_none() && !reasons.is_empty() {
+            narrowest_verdict_declined = true;
+        }
         let mut approved = false;
         if winner.is_none() && reasons.is_empty() {
             // The model call took time: re-check the kill switch and claim a use
@@ -901,12 +929,24 @@ async fn evaluate_delegations(
     // Only the narrowest candidate's streak counts: a broad rule is not paused by
     // requests a narrower rule owns.
     if let Some((first, _)) = candidates.first() {
-        let owned = winner.as_ref().is_none_or(|w| w.id == first.id);
-        if owned {
-            track_declines(state, first, winner.is_some());
+        match &winner {
+            Some(w) if w.id == first.id => track_declines(state, first, true),
+            None if narrowest_verdict_declined => track_declines(state, first, false),
+            _ => {}
         }
     }
+    let decided = winner.is_some();
     for check in &stored.delegation_checks {
+        // Rules behind the one that approved were never really consulted.
+        if decided
+            && !check.approved
+            && check
+                .reasons
+                .iter()
+                .any(|r| r.contains("narrower delegation"))
+        {
+            continue;
+        }
         audit::record(
             &state.db,
             &format!("delegation:{}", check.id),
@@ -1131,9 +1171,9 @@ fn set_assessment(state: &AppState, id: &str, f: impl FnOnce(&mut StoredAssessme
     let mut stored = row.assessment;
     f(&mut stored);
     let json = serde_json::to_string(&stored).unwrap_or_default();
-    // Assessment updates bump the version so open UIs refresh, but decisions check the
-    // version only for the state/scope they display, so this never races a decision
-    // into a 409 for the approver unless the suggestion changed under them.
+    // Assessment updates don't bump the version, so a decision made while the model
+    // was still thinking isn't refused. Open pages refresh from the event instead,
+    // and `apply_suggestion` checks which assessment the approver saw.
     let _ = state.db.lock().execute(
         "UPDATE requests SET assessment_json = ?1, updated_at = ?2 WHERE id = ?3",
         params![json, now_ms(), id],
@@ -1226,6 +1266,9 @@ pub struct DecideInput {
     /// notification action). Explicit `scope` and `delegate` are ignored.
     #[serde(default)]
     pub apply_suggestion: bool,
+    /// The `created_at` of the assessment whose suggestion the approver saw.
+    #[serde(default)]
+    pub suggestion_at: Option<i64>,
 }
 
 /// The group a "group" scope means by default: the host's smallest group. A group
@@ -1252,8 +1295,16 @@ fn host_scope_for(
         "group" => {
             let groups: Vec<String> = if groups.is_empty() {
                 default_group(state, host).into_iter().collect()
-            } else {
+            } else if host.id.is_empty() {
+                // A delegation made outside a request names its groups directly.
                 groups.to_vec()
+            } else {
+                // From a request: only groups the requesting host is in.
+                groups
+                    .iter()
+                    .filter(|g| host.groups.contains(g))
+                    .cloned()
+                    .collect()
             };
             if groups.is_empty() {
                 return Err(ApiError::bad_request("This host is not in any group."));
@@ -1320,6 +1371,12 @@ pub fn decide(state: &Shared, session: &Session, id: &str, input: DecideInput) -
     }
     let mut input = input;
     if approve && input.apply_suggestion {
+        let seen = row.assessment.assessment.as_ref().map(|a| a.created_at);
+        if input.suggestion_at.is_some() && input.suggestion_at != seen {
+            return Err(ApiError::conflict(
+                "The suggestion changed after the notification was sent.",
+            ));
+        }
         let (scope, delegate) = suggested_decision(state, &row, &host, &class)?;
         input.scope = scope;
         input.delegate = delegate;
@@ -1405,6 +1462,13 @@ pub fn decide(state: &Shared, session: &Session, id: &str, input: DecideInput) -
             return Err(ApiError::bad_request("No decision model is configured."));
         }
         let needs_passkey = if let Some(target) = &del.widen {
+            // Only a rule whose hosts, requester and target already cover this request
+            // can be widened by it, so widening never moves a rule away from its owner.
+            if !widen_covers(state, &row, &host, &class, target) {
+                return Err(ApiError::bad_request(
+                    "That delegation can't be widened from this request.",
+                ));
+            }
             let w = prepare_widen(state, &host, &row, target, del)?;
             let needs = w.needs_passkey;
             widening = Some(w);
@@ -1426,8 +1490,14 @@ pub fn decide(state: &Shared, session: &Session, id: &str, input: DecideInput) -
         .or_else(|| widening.as_ref().map(|w| w.id.clone()));
 
     let followed = row.assessment.assessment.as_ref().map(|a| {
-        a.suggestion.decision == input.decision
-            && (!approve || a.suggestion.command == scope.command)
+        let chosen = match &input.delegate {
+            Some(d) if approve => d.filter.clone().unwrap_or_else(|| "program".into()),
+            _ => match scope.command.as_str() {
+                "executable" => "program".into(),
+                c => c.to_string(),
+            },
+        };
+        a.suggestion.decision == input.decision && (!approve || a.suggestion.remember == chosen)
     });
     let label = match &grant_id {
         Some(_) => format!("{} · {}", session.device_label, scope_words(&scope)),
@@ -1504,7 +1574,7 @@ pub fn decide(state: &Shared, session: &Session, id: &str, input: DecideInput) -
                 "UPDATE grants SET spec_json = ?1, label = ?2, expires_at = ?3,
                     paused_at = CASE WHEN ?4 THEN NULL ELSE paused_at END,
                     pause_reason = CASE WHEN ?4 THEN NULL ELSE pause_reason END,
-                    max_uses = CASE WHEN ?4 THEN NULL ELSE max_uses END
+                    max_uses = CASE WHEN ?4 AND max_uses IS NOT NULL AND uses >= max_uses THEN NULL ELSE max_uses END
                  WHERE id = ?5 AND kind = 'delegation' AND revoked_at IS NULL",
                 params![
                     serde_json::to_string(&w.after).map_err(anyhow::Error::from)?,
@@ -1783,9 +1853,11 @@ fn delegation_commands(
 }
 
 /// A delegation needs a passkey when it is broader than a passkey-free grant: no
-/// command filter, every host, longer than a day, or a raised risk ceiling.
+/// command filter, anyone as requester, every host, longer than a day, or a raised
+/// risk ceiling.
 pub fn delegation_needs_passkey(state: &AppState, spec: &DelegationSpec, ttl: u32) -> bool {
     spec.commands.is_empty()
+        || spec.requester.is_none()
         || spec.hosts == HostScope::All
         || ttl == 0
         || ttl > 1440
@@ -1837,8 +1909,10 @@ fn prepare_widen(
         .assessment
         .assessment
         .as_ref()
+        // The model's (or template's) words only if the joined text was kept as offered.
         .filter(|a| {
-            intent.contains(a.suggestion.intent.as_str()) && !a.suggestion.intent.is_empty()
+            !a.suggestion.intent.is_empty()
+                && intent == combine_intents(&before.intent, &a.suggestion.intent)
         })
         .map(|a| a.suggestion.intent_source)
         .filter(|_| before.intent_source != grants::IntentSource::Approver)
@@ -1893,8 +1967,6 @@ fn prepare_widen(
     if let Some(r) = input.max_risk {
         after.limits.max_risk = after.limits.max_risk.max(r.min(60));
     }
-    after.notify = input.notify;
-
     let now = now_ms();
     let ttl = delegation_ttl(state, input.ttl_minutes);
     let wanted_expiry = (ttl > 0).then(|| now + ttl as i64 * 60_000);
@@ -1905,7 +1977,8 @@ fn prepare_widen(
     let resume = g.paused_at.is_some() || g.max_uses.is_some_and(|m| g.uses >= m);
     let default_risk = state.cfg.policy.automation.default_limits.max_risk;
     let needs_passkey = resume
-        || (after.commands.is_empty() && !before.commands.is_empty())
+        || after.commands.is_empty()
+        || (after.requester.is_none() && before.requester.is_some())
         || (after.hosts == HostScope::All && before.hosts != HostScope::All)
         || (expires_at.is_none() && g.expires_at.is_some())
         || expires_at.is_some_and(|e| e > now + 86_400_000 && Some(e) != g.expires_at)
@@ -1970,6 +2043,30 @@ pub fn widen_candidate(
         .collect();
     found.sort_by_key(|(rank, specificity, g, _)| (*rank, *specificity, -g.created_at));
     found.into_iter().next().map(|(_, _, g, spec)| (g, spec))
+}
+
+/// Whether a delegation's scope, apart from its command filter, covers this request.
+fn widen_covers(
+    state: &AppState,
+    row: &RequestRow,
+    host: &HostRow,
+    class: &ClassConfig,
+    target: &str,
+) -> bool {
+    let Ok(Some(g)) = grant(state, target) else {
+        return false;
+    };
+    let Ok(mut open) = serde_json::from_value::<DelegationSpec>(g.spec.clone()) else {
+        return false;
+    };
+    open.commands.clear();
+    let facts = HostFacts {
+        host_id: &host.id,
+        groups: &host.groups,
+    };
+    g.kind == "delegation"
+        && g.revoked_at.is_none()
+        && grants::delegation_scope_matches(&open, &row.envelope, &facts, class)
 }
 
 /// Join two kinds of work into one intent without repeating either.
@@ -2039,11 +2136,8 @@ fn suggested_decision(
             intent,
             ttl_minutes: sug.duration_minutes,
             hosts: sug.hosts.clone(),
-            requester: if sug.hosts == "host" {
-                sug.requester.clone()
-            } else {
-                "user".into()
-            },
+            // Rules follow the unix user across agent sessions, as on the sheet.
+            requester: "user".into(),
             filter: Some(sug.remember.clone()),
             prefix_len: Some(sug.prefix_len.max(1)),
             widen: widen.map(|(g, _)| g.id),
@@ -2327,8 +2421,21 @@ fn suggestion_for_push(state: &AppState, row: &RequestRow) -> Option<(String, bo
             } else {
                 "allow"
             };
+            let hosts = match d.hosts.as_str() {
+                "group" => format!(
+                    "on the {} group",
+                    default_group(state, &host).unwrap_or_default()
+                ),
+                "all" => "on all hosts".into(),
+                _ => format!("on {}", host.name),
+            };
             (
-                format!("Suggested: {verb} {} {}", sug.intent, length(d.ttl_minutes)),
+                format!(
+                    "Suggested: {verb} {} {hosts}, any {} session, {}",
+                    sug.intent,
+                    row.envelope.user.name,
+                    length(d.ttl_minutes)
+                ),
                 passkey,
             )
         }
@@ -2383,6 +2490,7 @@ async fn notify_pending_to(
         "body": body,
         "quick": class.quick_approve && class.step_up == StepUp::None,
         "remember": suggestion.as_ref().is_some_and(|(_, one_tap)| *one_tap),
+        "suggestion_at": row.assessment.assessment.as_ref().map(|a| a.created_at),
         "update": update,
         "danger": row.features.0.iter().any(|f| f.level == "danger"),
         "url": format!("/r/{}", row.id),

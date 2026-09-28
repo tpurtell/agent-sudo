@@ -97,7 +97,7 @@ agent (untrusted) ──exec──> agent-sudo (setuid root, sudo-rs fork)
 | Approve a class with `step_up = recent` (root shells, credentials) | passkey within `strong_auth_minutes` |
 | Approve a class with `step_up = always` (changes to sudo itself) | passkey within the last minute |
 | Create or widen a delegation with a program filter, for one host or group, up to a day | a signed-in approver session |
-| Refresh the sudo timestamp; create or widen a delegation with no filter, for all hosts, for longer than a day, or with a raised risk ceiling; resume a paused one | passkey within `strong_auth_minutes` |
+| Refresh the sudo timestamp; create or widen a delegation with no filter, for anyone, for all hosts, for longer than a day, or with a raised risk ceiling; resume a paused one | passkey within `strong_auth_minutes` |
 | Turn automation on (turning it off needs nothing) | admin + recent passkey |
 | Enroll or revoke hosts, invite or change users, remove a passkey | admin (where relevant) + recent passkey |
 

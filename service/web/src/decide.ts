@@ -49,13 +49,14 @@ export function delegationNeedsPasskey(r: RequestView, d: NonNullable<DecisionBo
   const w = d.widen ? r.widen : null;
   if (w) {
     if (w.paused) return true;
-    if (d.filter === "any" && w.covers !== "any command") return true;
+    if (d.filter === "any" || w.covers === "any command") return true;
+    if (d.requester === "any") return true;
     if (d.hosts === "all") return true;
     if (d.ttl_minutes === 0 && w.expires_at !== null) return true;
     if (d.ttl_minutes > 1440 && w.expires_at !== null && Date.now() + d.ttl_minutes * 60_000 > w.expires_at) return true;
     return risk > Math.max(def, w.max_risk);
   }
-  return d.filter === "any" || d.hosts === "all" || d.ttl_minutes === 0 || d.ttl_minutes > 1440 || risk > def;
+  return d.filter === "any" || d.requester === "any" || d.hosts === "all" || d.ttl_minutes === 0 || d.ttl_minutes > 1440 || risk > def;
 }
 
 /** Whether approving will prompt for a passkey first. */

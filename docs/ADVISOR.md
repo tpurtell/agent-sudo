@@ -127,11 +127,15 @@ for the narrowest matching rule only), or when anyone flags one of their approva
 `max_decisions` (0 by default) optionally adds a lifetime limit.
 
 A passkey is needed to create or widen a delegation that has no command filter,
-covers all hosts, lasts longer than a day, raises the risk ceiling, or resumes a
-paused rule. A program-filtered rule for a host or group, for up to a day, is weaker
+covers any requester, covers all hosts, lasts longer than a day, raises the risk
+ceiling, or resumes a paused rule. A rule can only be widened from a request its
+hosts, requester and target already cover. Going over the daily budget, the kill
+switch and model failures don't count towards pausing a rule. A program-filtered rule for a host or group, for up to a day, is weaker
 than a plain "any arguments" grant (the model still judges each request), so it
 needs only a signed-in session. That is what lets a notification's **Approve &
-remember** button apply the model's suggestion in one tap on Edge and Chrome.
+remember** button apply the model's suggestion in one tap on Edge and Chrome. The
+button carries the time of the assessment it showed; if the suggestion changed since,
+the tap is refused and the app opens instead.
 
 Default limits (override with `[policy.automation.default_limits]`):
 

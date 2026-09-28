@@ -165,7 +165,7 @@ self.addEventListener("notificationclick", (event) => {
       if ((event.action === "approve" || event.action === "deny" || event.action === "remember") && data.id) {
         try {
           const body = event.action === "remember"
-            ? { version: data.v, decision: "approve", apply_suggestion: true }
+            ? { version: data.v, decision: "approve", apply_suggestion: true, suggestion_at: data.suggestion_at ?? null }
             : { version: data.v, decision: event.action };
           const r = await post(`/api/requests/${data.id}/decision`, body);
           if (r.ok) {

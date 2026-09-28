@@ -1207,6 +1207,7 @@ async fn broad_or_long_delegations_need_a_passkey() {
         json!({"intent": "set-gpu-power: adjusting GPU power limits", "ttl_minutes": 43200, "hosts": "host", "requester": "user", "filter": "program"}),
         json!({"intent": "anything this agent needs for the benchmark", "ttl_minutes": 60, "hosts": "host", "requester": "session", "filter": "any"}),
         json!({"intent": "set-gpu-power: adjusting GPU power limits", "ttl_minutes": 60, "hosts": "all", "requester": "user", "filter": "program"}),
+        json!({"intent": "set-gpu-power: adjusting GPU power limits", "ttl_minutes": 60, "hosts": "host", "requester": "any", "filter": "program"}),
     ] {
         let (_, sub) = h.submit(GPU, &["300"], |_| {}).await;
         let (status, body) = h
@@ -1250,11 +1251,63 @@ async fn a_daily_budget_replaces_the_lifetime_limit() {
             .contains("last 24 hours"),
         "{r}"
     );
-    // The rule itself stays live: tomorrow it approves again.
+    // Going over budget is not a decline: even more requests than
+    // `pause_after_declines` leave the rule live, and tomorrow it approves again.
+    for n in 0..6 {
+        let (_, sub) = h.submit(GPU, &[&format!("{}", 200 + n)], |_| {}).await;
+        assert_eq!(sub["state"], "pending");
+    }
     let rules = h.delegations().await;
     assert_eq!(rules[0]["id"], created["id"]);
-    assert!(rules[0]["paused_at"].is_null());
+    assert!(rules[0]["paused_at"].is_null(), "{}", rules[0]);
     assert!(rules[0]["max_uses"].is_null());
+}
+
+#[tokio::test]
+async fn a_rule_is_only_widened_from_requests_it_already_covers() {
+    let (h, _fit, _calls) = v2_harness("").await;
+    // Another user's rule: widening it from tj's request would move it away from them.
+    let (_, other) = h
+        .web(
+            "POST",
+            "/api/delegations",
+            json!({"intent": "apt: installing packages", "ttl_minutes": 60,
+             "hosts": "all", "requester": "user", "unix_user": "alice", "programs": ["/usr/bin/apt"]}),
+        )
+        .await;
+    let (_, sub) = h.submit(GPU, &["300"], |_| {}).await;
+    let (status, body) = h
+        .decide(sub["id"].as_str().unwrap(), json!({"version": 1, "decision": "approve", "delegate": {
+            "intent": "apt: installing packages; set-gpu-power: adjusting GPU power limits", "ttl_minutes": 60,
+            "hosts": "host", "requester": "user", "filter": "program", "widen": other["id"]}}))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let rules = h.delegations().await;
+    assert_eq!(rules[0]["spec"]["commands"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn a_changed_suggestion_is_not_applied_from_a_stale_notification() {
+    let (h, _fit, _calls) = v2_harness("").await;
+    let (_, sub) = h.submit(GPU, &["300"], |_| {}).await;
+    let id = sub["id"].as_str().unwrap();
+    h.web("POST", &format!("/api/requests/{id}/assess"), json!({}))
+        .await;
+    for _ in 0..50 {
+        let r = h
+            .web("GET", &format!("/api/requests/{id}"), Value::Null)
+            .await
+            .1;
+        if r["assessment"]["assessment"].is_object() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let (status, _) = h
+        .decide(id, json!({"version": 1, "decision": "approve", "apply_suggestion": true, "suggestion_at": 1}))
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(h.delegations().await.is_empty());
 }
 
 #[tokio::test]

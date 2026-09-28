@@ -158,6 +158,10 @@ const MIGRATIONS: &[&str] = &[
         value TEXT NOT NULL
     );
     "#,
+    // 0.2.0: the per-day delegation budget counts a rule's recent approvals.
+    r#"
+    CREATE INDEX requests_delegation ON requests(delegation_id, decided_at);
+    "#,
 ];
 
 impl Db {

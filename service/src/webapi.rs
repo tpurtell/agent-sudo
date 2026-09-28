@@ -784,10 +784,10 @@ async fn grant_resume(
     if g.kind == "delegation" {
         require_strong(&state, &s, None)?;
     }
-    // A delegation that reached a lifetime limit resumes with that limit lifted.
+    // A delegation that reached its lifetime limit resumes with that limit lifted.
     state.db.lock().execute(
         "UPDATE grants SET paused_at = NULL, pause_reason = NULL,
-        max_uses = CASE WHEN kind = 'delegation' THEN NULL ELSE max_uses END
+        max_uses = CASE WHEN kind = 'delegation' AND max_uses IS NOT NULL AND uses >= max_uses THEN NULL ELSE max_uses END
         WHERE id = ?1 AND revoked_at IS NULL",
         [&id],
     )?;

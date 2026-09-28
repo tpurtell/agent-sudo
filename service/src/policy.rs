@@ -652,6 +652,24 @@ pub fn features(env: &RequestEnvelope) -> Features {
                 "Changes accounts, passwords or keys",
             );
         }
+        // Setting setuid/setgid bits or file capabilities creates a permanent root path.
+        let sets_suid = matches!(basename(&cmd), "chmod" | "install")
+            && env.argv.iter().any(|a| {
+                let a = a.trim_start_matches("--mode=");
+                (a.len() == 4
+                    && a.chars().all(|c| c.is_digit(8))
+                    && matches!(a.as_bytes()[0], b'2' | b'4' | b'6' | b'7'))
+                    || (a.contains('s')
+                        && (a.contains('+') || a.contains('='))
+                        && a.chars().all(|c| "ugoa+-=rwxXst,".contains(c)))
+            });
+        if sets_suid || matches!(basename(&cmd), "setcap") {
+            f.add(
+                "root_shell",
+                "danger",
+                "Sets setuid/setgid bits or file capabilities",
+            );
+        }
         if name_in(&cmd, WRITERS) {
             f.add("file_write", "info", "Writes or changes files");
         }

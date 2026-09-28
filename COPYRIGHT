@@ -1,0 +1,7 @@
+agent-sudo is dual-licensed under the Apache License, Version 2.0 (LICENSE-APACHE)
+and the MIT license (LICENSE-MIT), at your option.
+
+The sudo/ directory contains sudo-rs (https://github.com/trifectatechfoundation/sudo-rs),
+Copyright (c) the sudo-rs contributors, licensed under the same terms; see
+sudo/COPYRIGHT for its notices. Changes made for agent-sudo are listed in
+sudo/AGENT_SUDO_PATCH.md.

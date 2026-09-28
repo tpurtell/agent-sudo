@@ -1,0 +1,45 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  rust:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with: { components: "clippy, rustfmt" }
+      - run: sudo apt-get update && sudo apt-get install -y libpam0g-dev libssl-dev pkg-config
+      - name: Build the UI (embedded in the service)
+        run: cd service/web && npm ci && npm run build
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+      - name: sudo-rs fork, with and without the feature
+        working-directory: sudo
+        run: |
+          cargo fmt --check
+          cargo clippy --all-targets --features agent-approval -- -D warnings
+          cargo test --features agent-approval
+          cargo test
+
+  deploy-config:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - working-directory: deploy/service
+        run: |
+          docker compose --env-file .env.example --profile tailscale config -q
+          docker compose --env-file .env.example --profile nginx config -q
+
+  e2e:
+    runs-on: ubuntu-24.04
+    needs: rust
+    steps:
+      - uses: actions/checkout@v4
+      - run: cd e2e && npm ci && ./run.sh
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with: { name: playwright-report, path: e2e/playwright-report }

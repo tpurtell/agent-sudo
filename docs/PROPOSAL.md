@@ -1,6 +1,6 @@
 # agent-sudo: brokered privilege escalation for agent-driven machines
 
-Status: draft v0.3 (2026-09-28). Decisions taken so far are in `docs/DECISIONS.md`. This is the implementation proposal handed to the
+Status: implemented (v0.1, 2026-09-28). This is the original design; `docs/DECISIONS.md` records every place the build departed from it. This is the implementation proposal handed to the
 implementing model. It states intent, invariants, and the shape of each component.
 It deliberately leaves internal details open. The implementer is expected to make
 design corrections as requirements clarify, and to record each correction in

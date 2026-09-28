@@ -33,3 +33,60 @@ departs from `PROPOSAL.md` or resolves something it left open.
   makes every automated decision by applying a delegation to a clamped assessment.
 - Reference test model: an official DeepSeek route behind an OpenAI-compatible
   gateway; decision-model routing may later go through the same gateway.
+
+## 2026-09-28 Implementation (first build)
+
+Structure
+- `sudo/` stays outside the Cargo workspace. It keeps upstream's lockfile, lints and
+  release profile, so the fork builds and audits exactly like sudo-rs.
+- The fork's changes live in new modules (`src/sudo/agent/`, `src/pam/remote_wake.rs`)
+  plus about 100 lines in upstream files, all behind the `agent-approval` feature.
+  The existing `get_peer_credentials` helper from sudo-rs is reused for SO_PEERCRED.
+- The broker is enabled by the presence of `/etc/agent-sudo/client.conf` (root-owned,
+  not group/world writable). Installing the binary alone changes nothing.
+
+Behaviour the proposal left open or got wrong
+- **No `--agent-context-file`.** A setuid root binary reading a caller-chosen path
+  would let anyone send `/etc/shadow` to the approver. Use `--agent-context "$(cat f)"`.
+- **`sudo -n` is a non-blocking check.** It asks hostd whether a grant or delegation
+  covers the request and never creates a pending request (those are stored as quiet
+  records, hidden from the UI by default). Blocking would have made scripts'
+  `sudo -n true` probes spam approvers.
+- **The terminal race** uses the hostd socket as a second fd in the password reader's
+  poll. Ctrl-D, a prompt timeout, or exhausted attempts switch to waiting for the
+  remote decision instead of failing. A soft remote denial re-opens the prompt.
+- hostd checks that the request's pid equals SO_PEERCRED's and that the process's
+  real uid matches the claimed uid.
+- **Session fingerprints** are `boot-id:pid:starttime` of the nearest agent-looking
+  ancestor (or the session leader). Multi-host grants and delegations therefore bind
+  to the unix user: the UI switches "who" to the user when "where" widens, and the
+  advisor clamp does the same.
+- **Delegation limits were recalibrated** against DeepSeek V4 Flash: the proposal's
+  implied tight ceilings rejected ordinary driver installs (persistence and privilege
+  escape scores of 0.25–0.65 are normal for DKMS). Defaults are now configurable
+  (`policy.automation.default_limits`) and relevance plus overall risk do most of the
+  gating.
+- **Deterministic risk floors** (root shell, credentials, destructive, changes to sudo,
+  `sudo -v`) are applied after the model, and a new setuid/setcap feature treats
+  `chmod 4755`/`u+s`/`setcap` as root shells.
+- Model replies are parsed leniently (duplicate keys: last wins) and retried once.
+
+Service and UI
+- Web Push is implemented in-house (RFC 8291 aes128gcm + RFC 8292 VAPID with p256,
+  hkdf and aes-gcm) rather than via a crate; passkeys use webauthn-rs, with a
+  `residentKey: preferred` hint so passkey-only sign-in works without a username.
+- Once a user has a passkey, password sign-in is refused (configurable). Recovery is
+  a CLI-issued one-time invitation.
+- SSE for browsers, long-poll for hosts, one SQLite connection behind a mutex.
+- The first-run setup link comes from the log (or `AGENT_SUDO_SETUP_TOKEN`).
+- The UI is dependency-free TypeScript built with Vite (about 30 KB gzipped).
+  Notification Approve/Deny buttons work where the platform supports actions (Edge,
+  Chrome); the service worker reads the CSRF token from IndexedDB.
+
+Testing
+- No root on the development machine: everything privileged runs in containers. The
+  e2e runner is Playwright in Docker with the throwaway CA in Chromium's NSS store,
+  using full Chromium (the headless shell has no notification support).
+- OpenRouter's Decisions endpoint is `https://openrouter.ai/api/alpha/decisions`. The
+  operator's OpenRouter guardrail currently blocks `typesafe/jev-1.13`, so that backend
+  is covered by parser tests against the documented response, not a live call.

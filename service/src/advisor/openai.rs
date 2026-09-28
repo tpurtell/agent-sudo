@@ -139,8 +139,11 @@ pub fn extract_json(text: &str) -> Option<&str> {
 pub fn parse_reply(text: &str, model: &str) -> Result<Assessment> {
     let json_text =
         extract_json(text).ok_or_else(|| anyhow!("model reply contained no JSON object"))?;
+    // Parse through Value first: models occasionally repeat a key, and a generic
+    // JSON map keeps the last occurrence instead of rejecting the whole reply.
+    let value: Value = serde_json::from_str(json_text).context("model reply was not valid JSON")?;
     let raw: RawAssessment =
-        serde_json::from_str(json_text).context("model reply did not match the schema")?;
+        serde_json::from_value(value).context("model reply did not match the schema")?;
     let mut a = Assessment::placeholder();
     a.risk = raw.risk.round().clamp(0.0, 100.0) as u8;
     a.confidence = raw.confidence as f32;
@@ -166,6 +169,21 @@ pub fn parse_reply(text: &str, model: &str) -> Result<Assessment> {
 }
 
 pub async fn assess(
+    http: &reqwest::Client,
+    cfg: &AdvisorConfig,
+    input: &AdvisorInput,
+) -> Result<Assessment> {
+    match assess_once(http, cfg, input).await {
+        // A malformed reply is usually a one-off; ask once more before giving up.
+        Err(e) if format!("{e:#}").contains("model reply") => {
+            tracing::debug!("retrying after malformed model reply: {e:#}");
+            assess_once(http, cfg, input).await
+        }
+        other => other,
+    }
+}
+
+async fn assess_once(
     http: &reqwest::Client,
     cfg: &AdvisorConfig,
     input: &AdvisorInput,
@@ -251,5 +269,11 @@ mod tests {
         assert_eq!(a.suggestion.decision, "approve");
         assert_eq!(a.suggestion.ttl_minutes, 30);
         assert!(parse_reply("no json here", "m").is_err());
+        let dup = reply.replacen(
+            "\"relevance\": null",
+            "\"relevance\": null, \"relevance\": 0.5",
+            1,
+        );
+        assert_eq!(parse_reply(&dup, "m").unwrap().relevance, Some(0.5));
     }
 }

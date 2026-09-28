@@ -64,6 +64,7 @@ pub struct GrantSpec {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
 pub struct DelegationLimits {
     /// Highest overall risk (0-100) the model may approve.
     pub max_risk: u8,

@@ -33,14 +33,23 @@ RUN mkdir /bundle && cp /out/dist/$(cat /out/dist/NATIVE)/* /bundle/
 FROM scratch AS host-dist
 COPY --from=host-dist-stage /bundle/ /
 
+# Host bundles served by the service at /install.sh and /dist/. Defaults to this
+# build's native architecture; a release passes natively built bundles for every
+# architecture with --build-context hostdist=DIR (see scripts/release-images).
+FROM scratch AS hostdist
+COPY --from=build /out/dist /
+
 FROM debian:bookworm-slim AS service
+LABEL org.opencontainers.image.source="https://github.com/tpurtell/agent-sudo" \
+      org.opencontainers.image.description="agent-sudo approval service" \
+      org.opencontainers.image.licenses="Apache-2.0 OR MIT"
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates libssl3 && rm -rf /var/lib/apt/lists/* \
  && useradd --system --uid 10001 --home /data --shell /usr/sbin/nologin agent-sudo \
  && mkdir -p /data /etc/agent-sudo && chown agent-sudo /data
 COPY --from=build /out/agent-sudo-service /usr/local/bin/
 # Host binaries for this image's architecture and the one-line installer, served at
 # /install.sh and /dist/ so a same-architecture host needs nothing but curl.
-COPY --from=build /out/dist /usr/local/share/agent-sudo/dist
+COPY --from=hostdist / /usr/local/share/agent-sudo/dist
 COPY deploy/host/get.sh /usr/local/share/agent-sudo/install.sh
 USER agent-sudo
 VOLUME /data

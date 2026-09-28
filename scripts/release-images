@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# Build and publish the multi-architecture service image, natively on each arch.
+#
+#   scripts/release-images VERSION [--amd64-context CTX] [--arm64-context CTX] [--push]
+#
+# 1. Build the host bundle natively on each architecture's Docker context.
+# 2. Build each architecture's service image natively, carrying both bundles so
+#    /install.sh works for either kind of host.
+# 3. Push VERSION-amd64 and VERSION-arm64, then one manifest list as VERSION and latest,
+#    so `docker pull IMAGE:VERSION` picks the right one automatically.
+# No cross-compilation: each architecture builds on its own machine.
+set -Eeuo pipefail
+version=${1:?usage: release-images VERSION [--amd64-context CTX] [--arm64-context CTX] [--push]}
+shift
+amd64_ctx=default
+arm64_ctx=${ARM64_CONTEXT:-ds4rt-dodo}
+push=0
+image=${IMAGE:-ghcr.io/tpurtell/agent-sudo-service}
+while (($#)); do
+    case $1 in
+        --amd64-context) amd64_ctx=$2; shift 2 ;;
+        --arm64-context) arm64_ctx=$2; shift 2 ;;
+        --push) push=1; shift ;;
+        *) echo "unknown option $1" >&2; exit 2 ;;
+    esac
+done
+root=$(cd "$(dirname "$0")/.." && pwd)
+cd "$root"
+[[ -z $(git status --porcelain --untracked-files=no) ]] || { echo "commit your changes first" >&2; exit 1; }
+[[ $(grep -m1 '^version' Cargo.toml | cut -d'"' -f2) == "$version" ]] || { echo "Cargo.toml version is not $version" >&2; exit 1; }
+out=$root/target/release-images/$version
+rm -rf "$out" && mkdir -p "$out/hostdist"
+
+declare -A ctx=([amd64]=$amd64_ctx [arm64]=$arm64_ctx)
+for arch in amd64 arm64; do
+    echo "==> host bundle for $arch on context ${ctx[$arch]}"
+    docker --context "${ctx[$arch]}" build -q --platform "linux/$arch" --target host-dist \
+        --output "type=local,dest=$out/hostdist/$arch" . >/dev/null
+done
+(cd "$out/hostdist" && sha256sum */* > SHA256SUMS && echo amd64 > NATIVE)
+cat "$out/hostdist/SHA256SUMS"
+
+for arch in amd64 arm64; do
+    tag="$image:$version-$arch"
+    echo "==> service image $tag on context ${ctx[$arch]}"
+    docker --context "${ctx[$arch]}" build -q --platform "linux/$arch" --target service \
+        --build-context "hostdist=$out/hostdist" -t "$tag" . >/dev/null
+    if ((push)); then docker --context "${ctx[$arch]}" push -q "$tag"; fi
+done
+
+if ((push)); then
+    echo "==> manifest list $image:$version and :latest"
+    docker buildx imagetools create -t "$image:$version" -t "$image:latest" \
+        "$image:$version-amd64" "$image:$version-arm64"
+    docker buildx imagetools inspect "$image:$version" | head -20
+else
+    echo "Built locally (not pushed). Re-run with --push to publish."
+fi

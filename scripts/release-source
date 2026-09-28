@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# Create the source release tarball used by the Homebrew formula: the git tree at
+# HEAD plus the built web UI (so Homebrew builds need Rust but not Node).
+#
+#   scripts/release-source VERSION   ->  target/release/agent-sudo-VERSION.tar.gz
+set -Eeuo pipefail
+version=${1:?usage: release-source VERSION}
+root=$(cd "$(dirname "$0")/.." && pwd)
+cd "$root"
+[[ -z $(git status --porcelain --untracked-files=no) ]] || { echo "commit your changes first" >&2; exit 1; }
+[[ $(grep -m1 '^version' Cargo.toml | cut -d'"' -f2) == "$version" ]] || { echo "Cargo.toml version is not $version" >&2; exit 1; }
+(cd service/web && npm ci --no-audit --no-fund >/dev/null && npm run build >/dev/null)
+out=$root/target/release
+mkdir -p "$out"
+prefix=agent-sudo-$version
+stage=$(mktemp -d)
+trap 'rm -rf "$stage"' EXIT
+git archive --format=tar --prefix="$prefix/" HEAD | tar -x -C "$stage"
+mkdir -p "$stage/$prefix/service/web"
+cp -r service/web/dist "$stage/$prefix/service/web/dist"
+# Reproducible: fixed owner, mode and mtime from the commit.
+mtime=$(git log -1 --format=%ct)
+tar --sort=name --owner=0 --group=0 --numeric-owner --mtime="@$mtime" \
+    -C "$stage" -cf - "$prefix" | gzip -9n > "$out/$prefix.tar.gz"
+sha256sum "$out/$prefix.tar.gz"

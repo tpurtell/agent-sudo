@@ -136,10 +136,34 @@ pub enum NotifyMode {
     Silent,
 }
 
+/// Who wrote a delegation's intent. The requesting agent never does.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum IntentSource {
+    /// Typed or edited by the approver.
+    #[default]
+    Approver,
+    /// Drafted by the decision model from the command, then accepted by the approver.
+    Model,
+    /// Built by policy from the program name when the model's draft was rejected.
+    Template,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DelegationSpec {
-    /// The approver's own words about the expected work. Given to the model as intent.
+    /// The kind of work the model judges requests against, e.g.
+    /// `set-gpu-power: adjusting GPU power limits`. Never the requester's own text.
     pub intent: String,
+    #[serde(default)]
+    pub intent_source: IntentSource,
+    /// Programs this delegation covers, checked deterministically before the model is
+    /// asked anything. Empty means any program, which only the approver can choose.
+    #[serde(default)]
+    pub commands: Vec<CommandScope>,
+    /// Most automatic approvals in any 24 hours; `None` uses the service default and
+    /// 0 means no limit.
+    #[serde(default)]
+    pub per_day: Option<u32>,
     pub hosts: HostScope,
     /// `None` means any unix user on the scoped hosts.
     #[serde(default)]
@@ -234,6 +258,60 @@ pub fn delegation_scope_matches(
             .is_none_or(|r| requester_in_scope(r, env))
         && (spec.target_uids.is_empty() || spec.target_uids.contains(&env.target.uid))
         && (spec.classes.is_empty() || spec.classes.contains(&class.name))
+        && (spec.commands.is_empty() || spec.commands.iter().any(|c| command_in_scope(c, env)))
+}
+
+/// Order for trying delegations: the narrowest command filter first, then the
+/// narrowest hosts. A narrow rule owns the requests it was made for.
+pub fn delegation_specificity(spec: &DelegationSpec) -> (u8, u8, u8) {
+    let command = spec
+        .commands
+        .iter()
+        .map(|c| match c.kind {
+            CommandMatch::Exact => 0,
+            CommandMatch::Prefix => 1,
+            CommandMatch::Executable => 2,
+            CommandMatch::Any => 3,
+        })
+        .max()
+        .unwrap_or(3);
+    let hosts = match spec.hosts {
+        HostScope::Host { .. } => 0,
+        HostScope::Groups { .. } => 1,
+        HostScope::All => 2,
+    };
+    let who = match spec.requester {
+        Some(RequesterScope::Session { .. }) => 0,
+        Some(RequesterScope::User { .. }) => 1,
+        None => 2,
+    };
+    (command, hosts, who)
+}
+
+/// A program's file name, used to anchor intents and labels.
+pub fn basename(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
+}
+
+/// Short human form of a command filter, e.g. `set-gpu-power (any arguments)`.
+pub fn describe_commands(commands: &[CommandScope]) -> String {
+    if commands.is_empty() {
+        return "any command".into();
+    }
+    commands
+        .iter()
+        .map(|c| {
+            let name = c.executable.as_deref().map(basename).unwrap_or("?");
+            match c.kind {
+                CommandMatch::Exact if c.argv.is_empty() => format!("{name} (no arguments)"),
+                CommandMatch::Exact => format!("{name} {}", c.argv.join(" ")),
+                CommandMatch::Prefix => format!("{name} {} …", c.argv.join(" ")),
+                CommandMatch::Executable => format!("{name} (any arguments)"),
+                CommandMatch::Any => "any command".into(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// The deterministic envelope check applied to a model assessment. Returns the list of
@@ -243,6 +321,7 @@ pub fn delegation_verdict(
     features: &Features,
     global_forbidden: &[String],
     assessment: &Assessment,
+    relevance: Option<f32>,
 ) -> Vec<String> {
     let mut reasons = Vec::new();
     for f in spec
@@ -284,11 +363,18 @@ pub fn delegation_verdict(
             )),
         }
     }
-    match assessment.relevance {
-        Some(r) if r < spec.limits.min_relevance => {
+    // Without a command filter the intent is the only anchor, so it must fit better.
+    let min_relevance = if spec.commands.is_empty() {
+        spec.limits.min_relevance.max(0.7)
+    } else {
+        spec.limits.min_relevance
+    };
+    match relevance {
+        Some(r) if r < min_relevance => {
             reasons.push(format!(
-                "relevance to the delegation intent is only {:.0}%",
-                r * 100.0
+                "not the same kind of work (fit {:.0}%, needs {:.0}%)",
+                r * 100.0,
+                min_relevance * 100.0
             ));
         }
         None if !spec.intent.trim().is_empty() => {
@@ -481,31 +567,118 @@ mod tests {
         a
     }
 
-    #[test]
-    fn delegation_verdicts() {
-        let spec = DelegationSpec {
-            intent: "install drivers".into(),
+    fn dspec(intent: &str, commands: Vec<CommandScope>) -> DelegationSpec {
+        DelegationSpec {
+            intent: intent.into(),
+            intent_source: IntentSource::Approver,
+            commands,
+            per_day: None,
             hosts: HostScope::All,
             requester: None,
             target_uids: vec![],
             classes: vec![],
             limits: DelegationLimits::default(),
             notify: NotifyMode::Each,
+        }
+    }
+
+    fn program(exe: &str) -> CommandScope {
+        CommandScope {
+            kind: CommandMatch::Executable,
+            mode: Some(agent_sudo_protocol::api::Mode::Run),
+            executable: Some(exe.into()),
+            argv: vec![],
+        }
+    }
+
+    #[test]
+    fn delegation_program_filter() {
+        let host = HostFacts {
+            host_id: "h1",
+            groups: &[],
         };
+        let spec = dspec(
+            "set-gpu-power: adjusting GPU power limits",
+            vec![program("/usr/local/sbin/set-gpu-power")],
+        );
+        for argv in [&["300", "300"][..], &[][..], &["400"][..]] {
+            let e = env("/usr/local/sbin/set-gpu-power", argv);
+            assert!(delegation_scope_matches(&spec, &e, &host, &class_of(&e)));
+        }
+        let e = env("/usr/bin/nvidia-smi", &["-pl", "300"]);
+        assert!(!delegation_scope_matches(&spec, &e, &host, &class_of(&e)));
+
+        let mut prefix = program("/usr/bin/systemctl");
+        prefix.kind = CommandMatch::Prefix;
+        prefix.argv = vec!["restart".into()];
+        let spec = dspec("systemctl: restarting services", vec![prefix]);
+        let e = env("/usr/bin/systemctl", &["restart", "docker"]);
+        assert!(delegation_scope_matches(&spec, &e, &host, &class_of(&e)));
+        let e = env("/usr/bin/systemctl", &["disable", "docker"]);
+        assert!(!delegation_scope_matches(&spec, &e, &host, &class_of(&e)));
+    }
+
+    #[test]
+    fn unfiltered_delegations_need_a_closer_fit() {
+        let e = env("/usr/bin/apt", &["install", "jq"]);
+        let f = features(&e);
+        let a = assessment(10, "approve");
+        let open = dspec("apt: routine package management", vec![]);
+        let filtered = dspec(
+            "apt: routine package management",
+            vec![program("/usr/bin/apt")],
+        );
+        assert!(delegation_verdict(&filtered, &f, &[], &a, Some(0.6)).is_empty());
+        assert!(!delegation_verdict(&open, &f, &[], &a, Some(0.6)).is_empty());
+        assert!(delegation_verdict(&open, &f, &[], &a, Some(0.8)).is_empty());
+    }
+
+    #[test]
+    fn narrower_delegations_come_first() {
+        let mut exact = program("/usr/bin/apt");
+        exact.kind = CommandMatch::Exact;
+        let mut specs = [
+            dspec("any", vec![]),
+            dspec("program", vec![program("/usr/bin/apt")]),
+            dspec("exact", vec![exact]),
+        ];
+        specs.sort_by_key(delegation_specificity);
+        let order: Vec<&str> = specs.iter().map(|s| s.intent.as_str()).collect();
+        assert_eq!(order, ["exact", "program", "any"]);
+    }
+
+    #[test]
+    fn delegations_stored_before_filters_still_parse() {
+        let old = r#"{"intent":"GPU POWER CONFIG","hosts":{"scope":"host","host_id":"h"},"requester":null,
+            "target_uids":[],"classes":[],"limits":{"max_risk":30},"notify":"each"}"#;
+        let spec: DelegationSpec = serde_json::from_str(old).unwrap();
+        assert!(spec.commands.is_empty());
+        assert_eq!(spec.intent_source, IntentSource::Approver);
+        assert_eq!(spec.per_day, None);
+    }
+
+    #[test]
+    fn delegation_verdicts() {
+        let spec = dspec("install drivers", vec![]);
         let e = env("/usr/bin/apt", &["install", "nvidia-driver-580"]);
         let f = features(&e);
-        assert!(delegation_verdict(&spec, &f, &[], &assessment(10, "approve")).is_empty());
-        assert!(!delegation_verdict(&spec, &f, &[], &assessment(80, "approve")).is_empty());
-        assert!(!delegation_verdict(&spec, &f, &[], &assessment(10, "ask")).is_empty());
+        assert!(
+            delegation_verdict(&spec, &f, &[], &assessment(10, "approve"), Some(0.9)).is_empty()
+        );
+        assert!(
+            !delegation_verdict(&spec, &f, &[], &assessment(80, "approve"), Some(0.9)).is_empty()
+        );
+        assert!(!delegation_verdict(&spec, &f, &[], &assessment(10, "ask"), Some(0.9)).is_empty());
         let mut a = assessment(10, "approve");
         a.dimensions.insert("destructive".into(), 0.9);
-        assert!(!delegation_verdict(&spec, &f, &[], &a).is_empty());
+        assert!(!delegation_verdict(&spec, &f, &[], &a, Some(0.9)).is_empty());
         assert!(
             !delegation_verdict(
                 &spec,
                 &f,
                 &["package_manager".into()],
-                &assessment(10, "approve")
+                &assessment(10, "approve"),
+                Some(0.9)
             )
             .is_empty()
         );
@@ -517,15 +690,7 @@ mod tests {
             host_id: "h1",
             groups: &[],
         };
-        let spec = DelegationSpec {
-            intent: String::new(),
-            hosts: HostScope::All,
-            requester: None,
-            target_uids: vec![],
-            classes: vec![],
-            limits: DelegationLimits::default(),
-            notify: NotifyMode::Each,
-        };
+        let spec = dspec("", vec![]);
         let e = env("/usr/bin/apt", &["install", "x"]);
         assert!(delegation_scope_matches(&spec, &e, &host, &class_of(&e)));
         let e = env("/usr/bin/bash", &[]);

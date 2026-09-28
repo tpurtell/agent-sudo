@@ -77,8 +77,12 @@ pub struct AutomationConfig {
     /// Longest delegation an approver may create, in minutes. 0 means no limit, so
     /// an approver may delegate with no expiry.
     pub max_ttl_minutes: u32,
-    /// Most requests one delegation may approve before pausing.
+    /// Most requests one delegation may approve in its lifetime before pausing;
+    /// 0 means no lifetime limit.
     pub max_decisions: u32,
+    /// Most requests one delegation may approve in any 24 hours; 0 means no limit.
+    /// Requests over the budget come to a human.
+    pub max_decisions_per_day: u32,
     /// Pause a delegation after this many consecutive declined evaluations.
     pub pause_after_declines: u32,
     /// Features no delegation may approve, whatever its own settings say.
@@ -92,7 +96,8 @@ impl Default for AutomationConfig {
         Self {
             enabled: true,
             max_ttl_minutes: 0,
-            max_decisions: 100,
+            max_decisions: 0,
+            max_decisions_per_day: 50,
             pause_after_declines: 5,
             forbidden_features: vec![
                 "approval_system".into(),

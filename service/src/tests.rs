@@ -978,3 +978,323 @@ async fn delegations_can_last_forever() {
         .await;
     assert_eq!(sub["state"], "approved", "{sub}");
 }
+
+/// A model that answers in the current reply shape. Every delegation it is shown gets
+/// the fit in `fit` (percent); `calls` counts requests.
+async fn mock_model_v2(
+    risk: u8,
+    fit: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    calls: std::sync::Arc<std::sync::atomic::AtomicU32>,
+) -> String {
+    use axum::routing::post;
+    use std::sync::atomic::Ordering;
+    let app = axum::Router::new().route(
+        "/v1/chat/completions",
+        post(move |axum::Json(body): axum::Json<Value>| {
+            let fit = fit.clone();
+            let calls = calls.clone();
+            async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                let state: Value = serde_json::from_str(
+                    body["messages"][1]["content"].as_str().unwrap_or("{}"),
+                )
+                .unwrap();
+                let p = fit.load(Ordering::SeqCst) as f64 / 100.0;
+                let fits: Vec<Value> = state["delegations"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|d| json!({"id": d["id"], "p": p}))
+                    .collect();
+                let content = json!({
+                    "risk": risk, "confidence": 0.9,
+                    "dimensions": {"destructive": 0.05, "privilege_escape": 0.02, "persistence": 0.1,
+                                   "credential_access": 0.0, "network_security": 0.0, "availability": 0.1, "unusual": 0.1},
+                    "decision": "approve",
+                    "fit": fits,
+                    "suggestion": {"remember": "program", "prefix_len": 0, "kind_of_work": "adjusting GPU power limits",
+                                   "hosts": "host", "requester": "session", "duration": "1d"},
+                    "summary": "Sets GPU power limits with a root-owned script.", "reasons": ["narrow tool"]
+                });
+                axum::Json(json!({"model": "mock", "choices": [{"message": {"content": content.to_string()}}]}))
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    format!("http://{addr}/v1")
+}
+
+type Counter = std::sync::Arc<std::sync::atomic::AtomicU32>;
+
+async fn v2_harness(extra: &str) -> (Harness, Counter, Counter) {
+    let fit: Counter = Default::default();
+    let calls: Counter = Default::default();
+    fit.store(90, std::sync::atomic::Ordering::SeqCst);
+    let url = mock_model_v2(15, fit.clone(), calls.clone()).await;
+    let h = Harness::new(&format!(
+        "[advisor]\nurl = \"{url}\"\nmodel = \"mock\"\nauto_assess = false\n{extra}"
+    ))
+    .await;
+    (h, fit, calls)
+}
+
+impl Harness {
+    async fn decide(&self, id: &str, body: Value) -> (StatusCode, Value) {
+        self.web("POST", &format!("/api/requests/{id}/decision"), body)
+            .await
+    }
+
+    async fn delegations(&self) -> Vec<Value> {
+        let (_, grants) = self.web("GET", "/api/grants", Value::Null).await;
+        grants["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|g| g["kind"] == "delegation" && g["revoked_at"].is_null())
+            .cloned()
+            .collect()
+    }
+
+    fn weaken_session(&self) {
+        self.state
+            .db
+            .lock()
+            .execute("UPDATE web_sessions SET strong_auth_at = NULL", [])
+            .unwrap();
+    }
+}
+
+const GPU: &str = "/usr/local/sbin/set-gpu-power";
+
+#[tokio::test]
+async fn a_program_filter_delegates_the_kind_of_work_not_the_values() {
+    use std::sync::atomic::Ordering;
+    let (h, _fit, calls) = v2_harness("").await;
+    let (_, first) = h
+        .submit(GPU, &["300", "300"], |e| {
+            e.untrusted.context = Some("Set GPU 0 and GPU 1 power limits to 300 W each".into())
+        })
+        .await;
+    let id = first["id"].as_str().unwrap();
+    // A program-filtered rule for a day needs no passkey.
+    h.weaken_session();
+    let (status, d) = h
+        .decide(
+            id,
+            json!({"version": 1, "decision": "approve", "delegate": {
+            "intent": "set-gpu-power: adjusting GPU power limits", "ttl_minutes": 1440,
+            "hosts": "host", "requester": "user", "filter": "program"}}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{d}");
+    let rules = h.delegations().await;
+    assert_eq!(rules.len(), 1);
+    assert_eq!(rules[0]["spec"]["commands"][0]["match"], "executable");
+
+    // Restoring the default (no arguments) is the same kind of work.
+    let (_, restore) = h.submit(GPU, &[], |_| {}).await;
+    assert_eq!(restore["state"], "approved", "{restore}");
+    assert_eq!(restore["decision"]["via"], "delegation");
+
+    // Another program is outside the filter: no model call, straight to a human.
+    let before = calls.load(Ordering::SeqCst);
+    let (_, other) = h
+        .submit("/usr/bin/nvidia-smi", &["-pl", "300"], |_| {})
+        .await;
+    assert_eq!(other["state"], "pending");
+    assert_eq!(calls.load(Ordering::SeqCst), before);
+}
+
+#[tokio::test]
+async fn the_narrowest_delegation_decides_in_one_model_call() {
+    use std::sync::atomic::Ordering;
+    let (h, _fit, calls) = v2_harness("").await;
+    let (status, broad) = h
+        .web("POST", "/api/delegations", json!({"intent": "GPU maintenance on the server", "ttl_minutes": 0, "hosts": "all", "requester": "any"}))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{broad}");
+    let (_, narrow) = h
+        .web(
+            "POST",
+            "/api/delegations",
+            json!({"intent": "set-gpu-power: adjusting GPU power limits", "ttl_minutes": 1440,
+             "hosts": "all", "requester": "any", "programs": [GPU]}),
+        )
+        .await;
+    let (_, sub) = h.submit(GPU, &["250"], |_| {}).await;
+    assert_eq!(sub["state"], "approved", "{sub}");
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let (_, r) = h
+        .web(
+            "GET",
+            &format!("/api/requests/{}", sub["id"].as_str().unwrap()),
+            Value::Null,
+        )
+        .await;
+    assert_eq!(r["delegation_id"], narrow["id"]);
+    let checks = r["assessment"]["delegation_checks"].as_array().unwrap();
+    assert_eq!(checks.len(), 2);
+    assert_eq!(checks[0]["id"], narrow["id"]);
+    assert_eq!(checks[1]["approved"], false);
+}
+
+#[tokio::test]
+async fn approving_again_widens_the_rule_instead_of_adding_one() {
+    use std::sync::atomic::Ordering;
+    let (h, fit, _calls) = v2_harness("").await;
+    let (_, first) = h.submit(GPU, &["300", "300"], |_| {}).await;
+    h.decide(
+        first["id"].as_str().unwrap(),
+        json!({"version": 1, "decision": "approve", "delegate": {
+        "intent": "set-gpu-power: setting power limits to 300 W", "ttl_minutes": 60,
+        "hosts": "host", "requester": "user", "filter": "exact"}}),
+    )
+    .await;
+    let rule = h.delegations().await[0]["id"].clone();
+
+    // Same program, different values, and the model says it doesn't fit: the rule
+    // hands it over and is offered for widening.
+    fit.store(10, Ordering::SeqCst);
+    let (_, next) = h.submit(GPU, &[], |_| {}).await;
+    assert_eq!(next["state"], "pending");
+    let id = next["id"].as_str().unwrap();
+    let (_, r) = h
+        .web("GET", &format!("/api/requests/{id}"), Value::Null)
+        .await;
+    assert_eq!(r["widen"]["id"], rule, "{r}");
+    let (status, d) = h
+        .decide(
+            id,
+            json!({"version": 1, "decision": "approve", "delegate": {
+            "intent": "set-gpu-power: adjusting GPU power limits", "ttl_minutes": 1440,
+            "hosts": "host", "requester": "user", "filter": "program", "widen": rule}}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{d}");
+    let rules = h.delegations().await;
+    assert_eq!(rules.len(), 1, "widened, not duplicated");
+    let spec = &rules[0]["spec"];
+    assert_eq!(spec["intent"], "set-gpu-power: adjusting GPU power limits");
+    assert_eq!(spec["commands"].as_array().unwrap().len(), 1);
+    assert_eq!(spec["commands"][0]["match"], "executable");
+    // The expiry only ever moves later.
+    let left = rules[0]["expires_at"].as_i64().unwrap() - crate::util::now_ms();
+    assert!(left > 23 * 3_600_000, "{left}");
+
+    // A second program joins the same rule.
+    let (_, smi) = h
+        .submit("/usr/bin/nvidia-smi", &["-pl", "300"], |_| {})
+        .await;
+    let (status, d) = h
+        .decide(smi["id"].as_str().unwrap(), json!({"version": 1, "decision": "approve", "delegate": {
+            "intent": "set-gpu-power: adjusting GPU power limits; nvidia-smi: adjusting GPU power limits",
+            "ttl_minutes": 1440, "hosts": "host", "requester": "user", "filter": "program", "widen": rule}}))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{d}");
+    let rules = h.delegations().await;
+    assert_eq!(rules.len(), 1);
+    assert_eq!(rules[0]["spec"]["commands"].as_array().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn broad_or_long_delegations_need_a_passkey() {
+    let (h, _fit, _calls) = v2_harness("").await;
+    h.weaken_session();
+    for delegate in [
+        json!({"intent": "set-gpu-power: adjusting GPU power limits", "ttl_minutes": 0, "hosts": "host", "requester": "user", "filter": "program"}),
+        json!({"intent": "set-gpu-power: adjusting GPU power limits", "ttl_minutes": 43200, "hosts": "host", "requester": "user", "filter": "program"}),
+        json!({"intent": "anything this agent needs for the benchmark", "ttl_minutes": 60, "hosts": "host", "requester": "session", "filter": "any"}),
+        json!({"intent": "set-gpu-power: adjusting GPU power limits", "ttl_minutes": 60, "hosts": "all", "requester": "user", "filter": "program"}),
+    ] {
+        let (_, sub) = h.submit(GPU, &["300"], |_| {}).await;
+        let (status, body) = h
+            .decide(
+                sub["id"].as_str().unwrap(),
+                json!({"version": 1, "decision": "approve", "delegate": delegate}),
+            )
+            .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{delegate} {body}");
+        assert_eq!(body["error"], "step_up_required");
+    }
+}
+
+#[tokio::test]
+async fn a_daily_budget_replaces_the_lifetime_limit() {
+    let (h, _fit, _calls) = v2_harness("[policy.automation]\nmax_decisions_per_day = 2\n").await;
+    let (_, created) = h
+        .web(
+            "POST",
+            "/api/delegations",
+            json!({"intent": "set-gpu-power: adjusting GPU power limits", "ttl_minutes": 0,
+             "hosts": "all", "requester": "any", "programs": [GPU]}),
+        )
+        .await;
+    for n in ["250", "300"] {
+        let (_, sub) = h.submit(GPU, &[n], |_| {}).await;
+        assert_eq!(sub["state"], "approved", "{sub}");
+    }
+    let (_, third) = h.submit(GPU, &["350"], |_| {}).await;
+    assert_eq!(third["state"], "pending");
+    let (_, r) = h
+        .web(
+            "GET",
+            &format!("/api/requests/{}", third["id"].as_str().unwrap()),
+            Value::Null,
+        )
+        .await;
+    assert!(
+        r["assessment"]["delegation_check"]["reasons"]
+            .to_string()
+            .contains("last 24 hours"),
+        "{r}"
+    );
+    // The rule itself stays live: tomorrow it approves again.
+    let rules = h.delegations().await;
+    assert_eq!(rules[0]["id"], created["id"]);
+    assert!(rules[0]["paused_at"].is_null());
+    assert!(rules[0]["max_uses"].is_null());
+}
+
+#[tokio::test]
+async fn the_suggestion_can_be_applied_in_one_tap() {
+    let (h, _fit, _calls) = v2_harness("").await;
+    let (_, sub) = h
+        .submit(GPU, &["300", "300"], |e| {
+            e.untrusted.context = Some("Set GPU power limits to 300 W as requested".into())
+        })
+        .await;
+    let id = sub["id"].as_str().unwrap();
+    h.web("POST", &format!("/api/requests/{id}/assess"), json!({}))
+        .await;
+    let mut r = Value::Null;
+    for _ in 0..50 {
+        r = h
+            .web("GET", &format!("/api/requests/{id}"), Value::Null)
+            .await
+            .1;
+        if r["assessment"]["assessment"].is_object() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let sug = &r["assessment"]["assessment"]["suggestion"];
+    assert_eq!(sug["intent"], "set-gpu-power: adjusting GPU power limits");
+    assert_eq!(sug["intent_source"], "model");
+    h.weaken_session();
+    let (status, d) = h
+        .decide(
+            id,
+            json!({"version": 1, "decision": "approve", "apply_suggestion": true}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{d}");
+    let rules = h.delegations().await;
+    assert_eq!(rules.len(), 1);
+    let spec = &rules[0]["spec"];
+    assert_eq!(spec["intent"], "set-gpu-power: adjusting GPU power limits");
+    assert_eq!(spec["intent_source"], "model");
+    assert_eq!(spec["commands"][0]["match"], "executable");
+    assert!(!spec["intent"].as_str().unwrap().contains("300"));
+}

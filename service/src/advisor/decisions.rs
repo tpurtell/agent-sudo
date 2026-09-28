@@ -49,15 +49,15 @@ pub fn build_request(cfg: &AdvisorConfig, input: &AdvisorInput) -> Value {
         }),
     );
     questions.insert(
-        "command".into(),
+        "remember".into(),
         json!({
             "type": "choice",
-            "instructions": "What is the broadest reasonable standing approval for this command?",
+            "instructions": format!("What should the approver let the system remember for similar requests? {untrusted}"),
             "criteria": {
-                "once": "Only this single request",
-                "exact": "This exact command line again for a while",
-                "prefix": "The same program with the same leading arguments",
-                "executable": "The same program with any arguments",
+                "once": "Only this single request: risky, unusual or one-off",
+                "exact": "This exact command line again, because other arguments could be dangerous",
+                "prefix": "The same program with the same leading arguments, which choose the operation",
+                "program": "The same program with any arguments, because arguments only choose values",
             },
         }),
     );
@@ -74,20 +74,28 @@ pub fn build_request(cfg: &AdvisorConfig, input: &AdvisorInput) -> Value {
         }),
     );
     questions.insert(
-        "ttl".into(),
+        "duration".into(),
         json!({
             "type": "choice",
-            "instructions": "How long should a standing approval last?",
-            "criteria": {"10": "10 minutes", "30": "30 minutes", "60": "1 hour", "240": "4 hours"},
+            "instructions": "How long is it sensible to delegate this kind of work?",
+            "criteria": {
+                "1h": "An hour: unusual work",
+                "1d": "A day: ongoing work",
+                "30d": "A month: routine maintenance",
+                "forever": "Indefinitely: a narrow tool used again and again",
+            },
         }),
     );
-    if input.delegation.is_some() {
+    for (i, (_, d)) in input.delegations.iter().enumerate() {
+        let intent = d["intent"].as_str().unwrap_or_default();
         questions.insert(
-            "relevance".into(),
+            format!("fit_r{}", i + 1),
             json!({
                 "type": "noul",
-                "instructions": "Is this request a natural step of the work described in `delegation.intent` (written by the human approver)?",
-                "criteria": {"true": "Consistent with the intended work", "false": "Unrelated or beyond the intended work"},
+                "instructions": format!(
+                    "The approver delegated this kind of work: \"{intent}\". Is this request the same kind of work? Judge the category of task, not specific values: different numbers, versions, names of the same family, on/off, set/restore and defaults are the same kind of work. {untrusted}"
+                ),
+                "criteria": {"true": "Same kind of work", "false": "A different kind of work"},
             }),
         );
     }
@@ -137,23 +145,35 @@ pub fn parse_response(value: &Value, model: &str) -> Result<Assessment> {
             a.dimensions.insert((*key).into(), p);
         }
     }
-    a.relevance = noul(answers, "relevance");
+    if let Some(obj) = answers.as_object() {
+        for key in obj.keys().filter(|k| k.starts_with("fit_")) {
+            if let Some(p) = noul(answers, key) {
+                a.relevance_by
+                    .insert(key.trim_start_matches("fit_").to_string(), p);
+            }
+        }
+    }
     let (decision, decision_conf, decision_probs) = choice(answers, "decision");
-    let (command, _, command_probs) = choice(answers, "command");
+    let (remember, _, remember_probs) = choice(answers, "remember");
     let (hosts, _, host_probs) = choice(answers, "hosts");
-    let (ttl, _, ttl_probs) = choice(answers, "ttl");
-    let mut probabilities = BTreeMap::new();
+    let (duration, _, duration_probs) = choice(answers, "duration");
+    let mut probabilities: BTreeMap<String, BTreeMap<String, f32>> = BTreeMap::new();
     probabilities.insert("decision".into(), decision_probs);
-    probabilities.insert("command".into(), command_probs);
+    probabilities.insert("remember".into(), remember_probs);
     probabilities.insert("hosts".into(), host_probs);
-    probabilities.insert("ttl".into(), ttl_probs);
+    probabilities.insert("duration".into(), duration_probs);
     a.suggestion = Suggestion {
         decision: decision.unwrap_or_else(|| "ask".into()),
-        command: command.unwrap_or_else(|| "once".into()),
+        remember: remember.unwrap_or_else(|| "once".into()),
+        // Operations are almost always chosen by the first argument.
+        prefix_len: 1,
         hosts: hosts.unwrap_or_else(|| "host".into()),
         requester: "session".into(),
-        ttl_minutes: ttl.and_then(|t| t.parse().ok()).unwrap_or(30),
-        probabilities,
+        duration_minutes: duration
+            .and_then(|d| super::duration_minutes(&d))
+            .unwrap_or(1440),
+        // No prose from this backend: the clamp fills in the template intent.
+        ..Suggestion::default()
     };
     a.confidence = a.confidence.min(decision_conf.max(a.confidence));
     // The Decisions API does not produce prose; explain from its own numbers.
@@ -169,9 +189,11 @@ pub fn parse_response(value: &Value, model: &str) -> Result<Assessment> {
         .take(3)
         .map(|(k, p)| format!("{} {:.0}%", k.replace('_', " "), p * 100.0))
         .collect();
-    if let Some(r) = a.relevance {
-        a.reasons
-            .push(format!("fits the delegation intent {:.0}%", r * 100.0));
+    if let Some(r) = a.relevance_by.get("r1") {
+        a.reasons.push(format!(
+            "same kind of work as the delegation {:.0}%",
+            r * 100.0
+        ));
     }
     a.model = value["model"].as_str().unwrap_or(model).to_string();
     a.backend = "decisions".into();
@@ -223,9 +245,10 @@ mod tests {
                 "destructive": {"type": "noul", "noul": 0.04},
                 "privilege_escape": {"type": "noul", "noul": 0.5},
                 "decision": {"type": "choice", "choice": "approve", "confidence": 0.8, "probabilities": {"approve": 0.8, "ask": 0.2, "deny": 0.0}},
-                "command": {"type": "choice", "choice": "exact", "confidence": 0.7, "probabilities": {"exact": 0.7}},
+                "remember": {"type": "choice", "choice": "program", "confidence": 0.7, "probabilities": {"program": 0.7}},
                 "hosts": {"type": "choice", "choice": "group", "confidence": 0.6, "probabilities": {"group": 0.6}},
-                "ttl": {"type": "choice", "choice": "30", "confidence": 0.6, "probabilities": {"30": 0.6}}
+                "duration": {"type": "choice", "choice": "30d", "confidence": 0.6, "probabilities": {"30d": 0.6}},
+                "fit_r1": {"type": "noul", "noul": 0.8}
             },
             "usage": {"cost": 0.00002}
         });
@@ -233,7 +256,9 @@ mod tests {
         assert_eq!(a.risk, 20);
         assert_eq!(a.suggestion.decision, "approve");
         assert_eq!(a.suggestion.hosts, "group");
-        assert_eq!(a.suggestion.ttl_minutes, 30);
+        assert_eq!(a.suggestion.remember, "program");
+        assert_eq!(a.suggestion.duration_minutes, 43200);
+        assert_eq!(a.relevance_by["r1"], 0.8);
         assert_eq!(a.dimensions["privilege_escape"], 0.5);
         assert!(a.reasons.iter().any(|r| r.contains("privilege escape")));
         assert_eq!(a.cost_usd, Some(0.00002));

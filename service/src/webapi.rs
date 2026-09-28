@@ -159,7 +159,8 @@ async fn session_info(State(state): State<Shared>, headers: HeaderMap) -> ApiRes
         "vapid_public_key": state.push.public_key_b64,
         "push_enabled": state.push.enabled(),
         "advisor": advisor,
-        "automation": {"configured": state.cfg.policy.automation.enabled, "enabled": state.automation_enabled()},
+        "automation": {"configured": state.cfg.policy.automation.enabled, "enabled": state.automation_enabled(),
+                       "default_max_risk": state.cfg.policy.automation.default_limits.max_risk},
         "strong_auth_minutes": state.cfg.sessions.strong_auth_minutes,
     });
     let Some(s) = auth::session_from_headers(&state, &headers)? else {
@@ -783,12 +784,13 @@ async fn grant_resume(
     if g.kind == "delegation" {
         require_strong(&state, &s, None)?;
     }
-    if g.max_uses.is_some_and(|m| g.uses >= m) {
-        return Err(ApiError::bad_request(
-            "This delegation has used all its approvals. Create a new one.",
-        ));
-    }
-    state.db.lock().execute("UPDATE grants SET paused_at = NULL, pause_reason = NULL WHERE id = ?1 AND revoked_at IS NULL", [&id])?;
+    // A delegation that reached a lifetime limit resumes with that limit lifted.
+    state.db.lock().execute(
+        "UPDATE grants SET paused_at = NULL, pause_reason = NULL,
+        max_uses = CASE WHEN kind = 'delegation' THEN NULL ELSE max_uses END
+        WHERE id = ?1 AND revoked_at IS NULL",
+        [&id],
+    )?;
     state.delegation_declines.lock().unwrap().remove(&id);
     audit::record(
         &state.db,
@@ -1422,6 +1424,7 @@ async fn settings_get(State(state): State<Shared>, Authed(_s): Authed) -> ApiRes
             "enabled": state.automation_enabled(),
             "max_ttl_minutes": state.cfg.policy.automation.max_ttl_minutes,
             "max_decisions": state.cfg.policy.automation.max_decisions,
+            "max_decisions_per_day": state.cfg.policy.automation.max_decisions_per_day,
             "pause_after_declines": state.cfg.policy.automation.pause_after_declines,
             "forbidden_features": state.cfg.policy.automation.forbidden_features,
             "default_limits": state.cfg.policy.automation.default_limits,

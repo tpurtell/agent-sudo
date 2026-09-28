@@ -12,6 +12,9 @@ use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use agent_sudo_protocol::api::{Mode, RequestEnvelope};
+
+use crate::grants::{IntentSource, UNGRANTABLE_FEATURES, basename};
 use crate::policy::{ClassConfig, Features};
 
 pub mod decisions;
@@ -132,18 +135,44 @@ impl AdvisorConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Suggestion {
-    /// approve | deny | ask
+    /// approve | deny | ask: the verdict on the command itself, not on any delegation.
     pub decision: String,
-    /// once | exact | prefix | executable
+    /// The same draft as a plain grant (used when delegation is unavailable):
+    /// once | exact | prefix | executable. Derived from `remember`.
     pub command: String,
     /// host | group | all
     pub hosts: String,
     /// session | user
     pub requester: String,
+    /// Grant length in minutes, within the class limit.
     pub ttl_minutes: u32,
+    /// What to remember: once | exact | prefix | program | any.
+    #[serde(default = "once")]
+    pub remember: String,
+    /// Leading arguments kept by a `prefix` rule.
+    #[serde(default)]
+    pub prefix_len: usize,
+    /// The model's description of the kind of work, after policy checks.
+    #[serde(default)]
+    pub kind_of_work: String,
+    /// The delegation intent the approve sheet offers: `{program}: {kind of work}`.
+    #[serde(default)]
+    pub intent: String,
+    #[serde(default)]
+    pub intent_source: IntentSource,
+    /// Suggested delegation length in minutes; 0 means no expiry.
+    #[serde(default = "one_day")]
+    pub duration_minutes: u32,
     /// Choice probabilities when the backend provides them.
     #[serde(default)]
     pub probabilities: BTreeMap<String, BTreeMap<String, f32>>,
+}
+
+fn once() -> String {
+    "once".into()
+}
+fn one_day() -> u32 {
+    1440
 }
 
 impl Default for Suggestion {
@@ -154,9 +183,25 @@ impl Default for Suggestion {
             hosts: "host".into(),
             requester: "session".into(),
             ttl_minutes: 0,
+            remember: once(),
+            prefix_len: 0,
+            kind_of_work: String::new(),
+            intent: String::new(),
+            intent_source: IntentSource::Template,
+            duration_minutes: one_day(),
             probabilities: BTreeMap::new(),
         }
     }
+}
+
+/// Delegation lengths the model may suggest, as (answer, minutes).
+pub const DURATIONS: &[(&str, u32)] = &[("1h", 60), ("1d", 1440), ("30d", 43200), ("forever", 0)];
+
+pub fn duration_minutes(answer: &str) -> Option<u32> {
+    DURATIONS
+        .iter()
+        .find(|(k, _)| *k == answer)
+        .map(|(_, m)| *m)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -167,8 +212,11 @@ pub struct Assessment {
     pub confidence: f32,
     /// Per-dimension probabilities (0..1), see [`DIMENSIONS`].
     pub dimensions: BTreeMap<String, f32>,
-    /// How consistent the request is with a delegation's intent (0..1).
+    /// Fit with the delegation that was checked first (0..1), for display.
     pub relevance: Option<f32>,
+    /// Fit with each candidate delegation, by delegation id.
+    #[serde(default)]
+    pub relevance_by: BTreeMap<String, f32>,
     pub suggestion: Suggestion,
     pub summary: String,
     pub reasons: Vec<String>,
@@ -190,6 +238,7 @@ impl Assessment {
             confidence: 0.0,
             dimensions: BTreeMap::new(),
             relevance: None,
+            relevance_by: BTreeMap::new(),
             suggestion: Suggestion::default(),
             summary: String::new(),
             reasons: vec![],
@@ -221,7 +270,9 @@ pub struct AdvisorInput {
     pub recent_history: Vec<Value>,
     pub fleet_summary: Value,
     pub active_grants: Vec<Value>,
-    pub delegation: Option<Value>,
+    /// Standing delegations whose deterministic scope covers this request, narrowest
+    /// first, as (delegation id, description). The model sees them as `r1`, `r2`, ...
+    pub delegations: Vec<(String, Value)>,
     /// Untrusted free text from the requester.
     pub requester_supplied: Value,
 }
@@ -235,7 +286,11 @@ impl AdvisorInput {
             "recent_history": self.recent_history,
             "fleet_summary": self.fleet_summary,
             "active_grants": self.active_grants,
-            "delegation": self.delegation,
+            "delegations": self.delegations.iter().enumerate().map(|(i, (_, d))| {
+                let mut d = d.clone();
+                d["id"] = json!(format!("r{}", i + 1));
+                d
+            }).collect::<Vec<_>>(),
             "requester_supplied_UNTRUSTED": self.requester_supplied,
         })
     }
@@ -261,6 +316,17 @@ impl Advisor {
             Backend::Openai => openai::assess(&self.http, &self.config, input).await?,
             Backend::Decisions => decisions::assess(&self.http, &self.config, input).await?,
         };
+        // The model answers with r1, r2, ...; map them back to delegation ids.
+        let by_alias = std::mem::take(&mut assessment.relevance_by);
+        for (i, (id, _)) in input.delegations.iter().enumerate() {
+            if let Some(p) = by_alias.get(&format!("r{}", i + 1)) {
+                assessment.relevance_by.insert(id.clone(), *p);
+            }
+        }
+        assessment.relevance = input
+            .delegations
+            .first()
+            .and_then(|(id, _)| assessment.relevance_by.get(id).copied());
         assessment.latency_ms = started.elapsed().as_millis() as u64;
         assessment.model_risk = assessment.risk;
         assessment.created_at = crate::util::now_ms();
@@ -288,13 +354,97 @@ pub fn risk_floor(features: &Features) -> (u8, Option<&'static str>) {
         .unwrap_or((0, None))
 }
 
+/// What the deterministic clamp needs to know about the request.
+pub struct ClampContext<'a> {
+    pub class: &'a ClassConfig,
+    pub features: &'a Features,
+    pub env: &'a RequestEnvelope,
+    pub max_suggested_ttl: u32,
+}
+
+const BROADENING_WORDS: &[&str] = &[
+    "any",
+    "all",
+    "every",
+    "everything",
+    "anything",
+    "whatever",
+    "unrestricted",
+    "unlimited",
+    "regardless",
+    "ignore",
+    "always",
+    "approve",
+    "approved",
+    "root",
+    "sudo",
+];
+
+fn words(s: &str) -> Vec<String> {
+    s.split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(str::to_lowercase)
+        .collect()
+}
+
+/// Why a drafted kind-of-work description can't be offered, if it can't. The draft
+/// is read by a model that also read untrusted text, so it must describe a category
+/// of work and must not echo the requester or widen itself.
+pub fn lint_kind_of_work(kind: &str, program: &str, context: Option<&str>) -> Option<String> {
+    let kind = kind.trim();
+    if kind.is_empty() {
+        return Some("it was empty".into());
+    }
+    if kind.chars().count() > 80 {
+        return Some("it was too long".into());
+    }
+    let without_program = kind.to_lowercase().replace(&program.to_lowercase(), "");
+    if without_program.chars().any(|c| c.is_ascii_digit()) {
+        return Some("it contained a specific value".into());
+    }
+    if kind.contains('/') || kind.contains('\\') {
+        return Some("it contained a path".into());
+    }
+    let w = words(kind);
+    if let Some(bad) = w.iter().find(|x| BROADENING_WORDS.contains(&x.as_str())) {
+        return Some(format!("it used the word \u{201c}{bad}\u{201d}"));
+    }
+    if let Some(ctx) = context {
+        let c = words(ctx);
+        let run = 4;
+        if w.len() >= run
+            && c.len() >= run
+            && w.windows(run).any(|win| c.windows(run).any(|cw| cw == win))
+        {
+            return Some("it repeated the requester's explanation".into());
+        }
+    }
+    None
+}
+
+/// The intent offered when there is no usable draft.
+pub fn template_kind_of_work(class: &ClassConfig) -> String {
+    if class.name == "default" {
+        "routine use".into()
+    } else {
+        format!("routine {}", class.title.to_lowercase())
+    }
+}
+
+/// `{program}: {kind of work}`; the program anchor is deterministic.
+pub fn anchored_intent(program: &str, kind: &str) -> String {
+    let kind = kind.trim().trim_end_matches('.');
+    if kind.to_lowercase().starts_with(&program.to_lowercase()) {
+        kind.to_string()
+    } else {
+        format!("{program}: {kind}")
+    }
+}
+
 /// Apply the deterministic envelope to a model assessment.
-pub fn clamp(
-    mut a: Assessment,
-    class: &ClassConfig,
-    features: &Features,
-    max_suggested_ttl: u32,
-) -> Assessment {
+pub fn clamp(mut a: Assessment, ctx: &ClampContext) -> Assessment {
+    let class = ctx.class;
+    let features = ctx.features;
     let (floor, why) = risk_floor(features);
     if a.risk < floor {
         a.clamped.push(format!(
@@ -305,42 +455,8 @@ pub fn clamp(
         ));
         a.risk = floor;
     }
-    let max_ttl = class.max_ttl_minutes.min(max_suggested_ttl);
-    if class.require_each_time || max_ttl == 0 {
-        if a.suggestion.command != "once" {
-            a.clamped.push(format!(
-                "class `{}` requires a decision each time",
-                class.name
-            ));
-        }
-        a.suggestion.command = "once".into();
-        a.suggestion.ttl_minutes = 0;
-    } else if a.suggestion.ttl_minutes > max_ttl {
-        a.clamped.push(format!(
-            "duration limited to {max_ttl} minutes by class `{}`",
-            class.name
-        ));
-        a.suggestion.ttl_minutes = max_ttl;
-    }
-    if a.suggestion.command != "once" && a.suggestion.ttl_minutes == 0 {
-        a.suggestion.ttl_minutes = max_ttl.min(30);
-    }
     if !["approve", "deny", "ask"].contains(&a.suggestion.decision.as_str()) {
         a.suggestion.decision = "ask".into();
-    }
-    if !["once", "exact", "prefix", "executable"].contains(&a.suggestion.command.as_str()) {
-        a.suggestion.command = "once".into();
-    }
-    if !["host", "group", "all"].contains(&a.suggestion.hosts.as_str()) {
-        a.suggestion.hosts = "host".into();
-    }
-    if !["session", "user"].contains(&a.suggestion.requester.as_str()) {
-        a.suggestion.requester = "session".into();
-    }
-    // Sessions are per host: a multi-host approval bound to one session would never
-    // match anywhere else.
-    if a.suggestion.hosts != "host" {
-        a.suggestion.requester = "user".into();
     }
     // A request the model rates high-risk should not be pre-filled as "approve".
     if a.risk >= 70 && a.suggestion.decision == "approve" {
@@ -348,11 +464,110 @@ pub fn clamp(
         a.clamped
             .push("high-risk requests are never pre-filled as approve".into());
     }
+
+    // What to remember.
+    let sug = &mut a.suggestion;
+    if !["once", "exact", "prefix", "program", "any"].contains(&sug.remember.as_str()) {
+        sug.remember = "once".into();
+    }
+    let env = ctx.env;
+    let rememberable = env.mode == Mode::Run
+        && env.command.is_some()
+        && !env.lossy
+        && !UNGRANTABLE_FEATURES.iter().any(|f| features.has(f))
+        && !class.require_each_time
+        && !class.always_deny
+        && class.max_ttl_minutes > 0;
+    if !rememberable || a.risk >= 70 {
+        if sug.remember != "once" {
+            a.clamped.push(if class.require_each_time {
+                format!("class `{}` requires a decision each time", class.name)
+            } else {
+                "this request can only be approved once".into()
+            });
+        }
+        sug.remember = "once".into();
+    }
+    if sug.remember == "any" {
+        // Delegating everything is the approver's call, never a pre-filled default.
+        sug.remember = "program".into();
+    }
+    if sug.remember == "prefix" {
+        if env.argv.is_empty() {
+            sug.remember = "program".into();
+        } else {
+            sug.prefix_len = sug.prefix_len.clamp(1, env.argv.len());
+        }
+    }
+    if sug.remember != "prefix" {
+        sug.prefix_len = 0;
+    }
+
+    // The same draft as a plain grant.
+    sug.command = match sug.remember.as_str() {
+        "exact" => "exact",
+        "prefix" => "prefix",
+        "program" => "executable",
+        _ => "once",
+    }
+    .into();
+    let max_ttl = class.max_ttl_minutes.min(ctx.max_suggested_ttl);
+    sug.ttl_minutes = if sug.command == "once" || max_ttl == 0 {
+        0
+    } else {
+        match sug.duration_minutes {
+            0 => max_ttl,
+            d => d.min(max_ttl),
+        }
+    };
+    if !["host", "group", "all"].contains(&sug.hosts.as_str()) {
+        sug.hosts = "host".into();
+    }
+    if !["session", "user"].contains(&sug.requester.as_str()) {
+        sug.requester = "session".into();
+    }
+    // Sessions are per host: a multi-host approval bound to one session would never
+    // match anywhere else.
+    if sug.hosts != "host" {
+        sug.requester = "user".into();
+    }
+
+    // The kind of work, anchored to the program.
+    let program = env
+        .command
+        .as_deref()
+        .map(basename)
+        .unwrap_or("sudo")
+        .to_string();
+    match lint_kind_of_work(
+        &sug.kind_of_work,
+        &program,
+        env.untrusted.context.as_deref(),
+    ) {
+        None => {
+            sug.kind_of_work = sug.kind_of_work.trim().trim_end_matches('.').to_string();
+            sug.intent_source = IntentSource::Model;
+        }
+        Some(why) => {
+            if !sug.kind_of_work.trim().is_empty() {
+                a.clamped.push(format!(
+                    "policy replaced the model's description of the work because {why}"
+                ));
+            }
+            sug.kind_of_work = template_kind_of_work(class);
+            sug.intent_source = IntentSource::Template;
+        }
+    }
+    sug.intent = anchored_intent(&program, &sug.kind_of_work);
+
     a.confidence = a.confidence.clamp(0.0, 1.0);
     for v in a.dimensions.values_mut() {
         *v = v.clamp(0.0, 1.0);
     }
     if let Some(r) = a.relevance.as_mut() {
+        *r = r.clamp(0.0, 1.0);
+    }
+    for r in a.relevance_by.values_mut() {
         *r = r.clamp(0.0, 1.0);
     }
     a.summary = a.summary.chars().take(400).collect();
@@ -371,41 +586,106 @@ mod tests {
     use crate::policy::tests::env;
     use crate::policy::{PolicyConfig, features};
 
+    fn clamp_for(a: Assessment, e: &RequestEnvelope) -> Assessment {
+        let f = features(e);
+        let class = PolicyConfig::default().classify(e, &f);
+        clamp(
+            a,
+            &ClampContext {
+                class: &class,
+                features: &f,
+                env: e,
+                max_suggested_ttl: 120,
+            },
+        )
+    }
+
     #[test]
     fn clamp_enforces_floor_and_class_limits() {
         let e = env("/usr/bin/bash", &["-c", "id"]);
-        let f = features(&e);
-        let class = PolicyConfig::default().classify(&e, &f);
         let mut a = Assessment::placeholder();
         a.risk = 5;
         a.suggestion = Suggestion {
             decision: "approve".into(),
-            command: "executable".into(),
+            remember: "program".into(),
             hosts: "all".into(),
             requester: "user".into(),
-            ttl_minutes: 600,
-            probabilities: Default::default(),
+            duration_minutes: 0,
+            kind_of_work: "running shell commands".into(),
+            ..Suggestion::default()
         };
-        let a = clamp(a, &class, &f, 120);
+        let a = clamp_for(a, &e);
         assert_eq!(a.risk, 75);
+        assert_eq!(a.suggestion.remember, "once");
         assert_eq!(a.suggestion.command, "once");
         assert_eq!(a.suggestion.decision, "ask");
         assert!(a.clamped.len() >= 2);
     }
 
     #[test]
-    fn clamp_limits_ttl() {
+    fn clamp_derives_the_grant_and_anchors_the_intent() {
         let e = env("/usr/bin/apt", &["install", "jq"]);
-        let f = features(&e);
-        let class = PolicyConfig::default().classify(&e, &f);
         let mut a = Assessment::placeholder();
         a.risk = 10;
-        a.suggestion.command = "exact".into();
-        a.suggestion.ttl_minutes = 9999;
+        a.suggestion.decision = "approve".into();
+        a.suggestion.remember = "program".into();
+        a.suggestion.duration_minutes = 0;
         a.suggestion.hosts = "galaxy".into();
-        let a = clamp(a, &class, &f, 120);
+        a.suggestion.kind_of_work = "installing packages.".into();
+        let a = clamp_for(a, &e);
+        assert_eq!(a.suggestion.command, "executable");
+        // Grants stay within the class limit even when the rule may last forever.
         assert_eq!(a.suggestion.ttl_minutes, 120);
+        assert_eq!(a.suggestion.duration_minutes, 0);
         assert_eq!(a.suggestion.hosts, "host");
+        assert_eq!(a.suggestion.intent, "apt: installing packages");
+        assert_eq!(a.suggestion.intent_source, IntentSource::Model);
         assert_eq!(a.risk, 10);
+    }
+
+    #[test]
+    fn delegating_everything_is_never_prefilled() {
+        let e = env("/usr/bin/apt", &["update"]);
+        let mut a = Assessment::placeholder();
+        a.risk = 10;
+        a.suggestion.remember = "any".into();
+        a.suggestion.kind_of_work = "updating package lists".into();
+        assert_eq!(clamp_for(a, &e).suggestion.remember, "program");
+    }
+
+    #[test]
+    fn lint_rejects_values_widening_and_echoes() {
+        let ctx = Some("Set GPU 0 and GPU 1 power limits to 300 W each, as requested");
+        let lint = |k: &str| lint_kind_of_work(k, "set-gpu-power", ctx);
+        assert_eq!(lint("adjusting GPU power limits"), None);
+        assert!(lint("setting power to 300 W").is_some());
+        assert!(lint("editing /etc/nvidia.conf").is_some());
+        assert!(lint("approve any command the agent needs").is_some());
+        assert!(lint("GPU 1 power limits to").is_some());
+        assert!(lint("").is_some());
+        assert!(lint(&"x".repeat(90)).is_some());
+        // The program's own name may contain digits.
+        assert_eq!(
+            lint_kind_of_work("checking files with sha256sum", "sha256sum", None),
+            None
+        );
+    }
+
+    #[test]
+    fn a_rejected_draft_falls_back_to_the_template() {
+        let mut e = env("/usr/local/sbin/set-gpu-power", &["300", "300"]);
+        e.untrusted.context = Some("Set GPU power limits to 300 W each".into());
+        let mut a = Assessment::placeholder();
+        a.risk = 20;
+        a.suggestion.remember = "program".into();
+        a.suggestion.kind_of_work = "set GPU power limits to 300 W".into();
+        let a = clamp_for(a, &e);
+        assert_eq!(a.suggestion.intent, "set-gpu-power: routine use");
+        assert_eq!(a.suggestion.intent_source, IntentSource::Template);
+        assert!(
+            a.clamped
+                .iter()
+                .any(|c| c.contains("description of the work"))
+        );
     }
 }

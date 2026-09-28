@@ -192,6 +192,16 @@ pub fn encrypt_with(
     Ok(out)
 }
 
+/// Whether notifications from this push service can show action buttons. Chrome
+/// and Edge can; Safari (Apple's service) and Firefox (Mozilla's) cannot.
+pub fn shows_actions(endpoint: &str) -> bool {
+    let host = endpoint
+        .strip_prefix("https://")
+        .and_then(|r| r.split('/').next())
+        .unwrap_or("");
+    host == "fcm.googleapis.com" || host.ends_with(".notify.windows.com")
+}
+
 pub fn subscriptions_for_approvers(db: &Db) -> anyhow::Result<Vec<Subscription>> {
     let conn = db.lock();
     let mut stmt = conn.prepare(

@@ -83,6 +83,9 @@ enum Command {
         /// Requester-supplied context.
         #[arg(long)]
         context: Option<String>,
+        /// Also judge fit with a delegation of this intent (repeatable).
+        #[arg(long = "delegation")]
+        delegations: Vec<String>,
     },
 }
 
@@ -169,13 +172,19 @@ pub async fn advisor_sample(cfg: ServiceConfig) -> Result<advisor::Assessment> {
         &state,
         "/usr/bin/apt install -y jq".into(),
         Some("Installing jq to parse JSON in a build script".into()),
+        vec![],
     )
     .await?;
     Ok(a)
 }
 
-async fn advisor_test(state: Shared, command: String, context: Option<String>) -> Result<()> {
-    let (a, class, features) = sample_assessment(&state, command, context).await?;
+async fn advisor_test(
+    state: Shared,
+    command: String,
+    context: Option<String>,
+    delegations: Vec<String>,
+) -> Result<()> {
+    let (a, class, features) = sample_assessment(&state, command, context, delegations).await?;
     println!("class: {} ({})", class.name, class.title);
     println!("features: {}", features.keys().join(", "));
     println!("{}", serde_json::to_string_pretty(&a)?);
@@ -186,6 +195,7 @@ async fn sample_assessment(
     state: &Shared,
     command: String,
     context: Option<String>,
+    delegations: Vec<String>,
 ) -> Result<(advisor::Assessment, policy::ClassConfig, policy::Features)> {
     let advisor = state
         .advisor
@@ -266,14 +276,45 @@ async fn sample_assessment(
         last_seen_at: None,
         revoked_at: None,
     };
-    let input = engine::advisor_input(state, &row, &host, &class, None);
+    let candidates: Vec<(engine::GrantRow, grants::DelegationSpec)> = delegations
+        .iter()
+        .enumerate()
+        .map(|(i, intent)| {
+            let spec = grants::DelegationSpec {
+                intent: intent.clone(),
+                intent_source: grants::IntentSource::Approver,
+                commands: vec![],
+                per_day: None,
+                hosts: grants::HostScope::All,
+                requester: None,
+                target_uids: vec![],
+                classes: vec![],
+                limits: Default::default(),
+                notify: Default::default(),
+            };
+            let g = engine::GrantRow {
+                id: format!("dlg_test_{}", i + 1),
+                kind: "delegation".into(),
+                label: intent.clone(),
+                spec: serde_json::to_value(&spec).unwrap_or_default(),
+                created_by: "test".into(),
+                created_from_request: None,
+                created_at: util::now_ms(),
+                expires_at: None,
+                revoked_at: None,
+                revoked_by: None,
+                uses: 0,
+                max_uses: None,
+                last_used_at: None,
+                paused_at: None,
+                pause_reason: None,
+            };
+            (g, spec)
+        })
+        .collect();
+    let input = engine::advisor_input(state, &row, &host, &class, &candidates);
     let a = advisor.assess(&input).await?;
-    let a = advisor::clamp(
-        a,
-        &class,
-        &features,
-        advisor.config.max_suggested_ttl_minutes,
-    );
+    let a = advisor::clamp(a, &engine::clamp_context(state, &row, &class));
     Ok((a, class, features))
 }
 
@@ -358,9 +399,11 @@ async fn main() -> Result<()> {
                     println!("{}/invite#{token}", state.cfg.base_url());
                     Ok(())
                 }
-                Command::AdvisorTest { command, context } => {
-                    advisor_test(state, command, context).await
-                }
+                Command::AdvisorTest {
+                    command,
+                    context,
+                    delegations,
+                } => advisor_test(state, command, context, delegations).await,
                 Command::CheckConfig | Command::Health { .. } | Command::Init(_) => unreachable!(),
             }
         }

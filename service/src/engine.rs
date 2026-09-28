@@ -28,8 +28,8 @@ use crate::auth::Session;
 use crate::error::{ApiError, ApiResult};
 use crate::events::Event;
 use crate::grants::{
-    self, CommandMatch, CommandScope, DelegationLimits, DelegationSpec, GrantSpec, HostFacts,
-    HostScope, NotifyMode, RequesterScope,
+    self, CommandMatch, CommandScope, DelegationSpec, GrantSpec, HostFacts, HostScope, NotifyMode,
+    RequesterScope,
 };
 use crate::policy::{self, ClassConfig, Features, StepUp};
 use crate::push;
@@ -1352,9 +1352,12 @@ pub fn create_delegation(
         }),
         (None, _) => None,
     };
-    let mut limits = DelegationLimits::default();
+    let mut limits = auto.default_limits.clone();
     if let Some(r) = input.max_risk {
         limits.max_risk = r.min(60);
+    }
+    if limits.max_risk > 60 {
+        limits.max_risk = 60;
     }
     let spec = DelegationSpec {
         intent: intent.chars().take(600).collect(),
@@ -1369,7 +1372,13 @@ pub fn create_delegation(
     };
     let id = new_id("dlg");
     let now = now_ms();
-    let label: String = intent.chars().take(80).collect();
+    let label = if intent.chars().count() <= 80 {
+        intent.to_string()
+    } else {
+        let cut: String = intent.chars().take(79).collect();
+        let cut = cut.rsplit_once(' ').map(|(head, _)| head).unwrap_or(&cut);
+        format!("{}…", cut.trim_end_matches([',', '.', ';', ':']))
+    };
     state.db.lock().execute(
         "INSERT INTO grants (id, kind, label, spec_json, created_by, created_from_request, created_at, expires_at, max_uses)
          VALUES (?1, 'delegation', ?2, ?3, ?4, ?5, ?6, ?7, ?8)",

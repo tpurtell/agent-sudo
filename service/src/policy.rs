@@ -82,6 +82,8 @@ pub struct AutomationConfig {
     pub pause_after_declines: u32,
     /// Features no delegation may approve, whatever its own settings say.
     pub forbidden_features: Vec<String>,
+    /// Limits applied to new delegations (risk, confidence, dimension ceilings).
+    pub default_limits: crate::grants::DelegationLimits,
 }
 
 impl Default for AutomationConfig {
@@ -97,6 +99,7 @@ impl Default for AutomationConfig {
                 "validate".into(),
                 "lossy".into(),
             ],
+            default_limits: crate::grants::DelegationLimits::default(),
         }
     }
 }

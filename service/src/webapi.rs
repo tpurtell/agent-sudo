@@ -1408,7 +1408,7 @@ async fn settings_get(State(state): State<Shared>, Authed(_s): Authed) -> ApiRes
             "max_decisions": state.cfg.policy.automation.max_decisions,
             "pause_after_declines": state.cfg.policy.automation.pause_after_declines,
             "forbidden_features": state.cfg.policy.automation.forbidden_features,
-            "default_limits": crate::grants::DelegationLimits::default(),
+            "default_limits": state.cfg.policy.automation.default_limits,
         },
         "sessions": state.cfg.sessions,
     })))

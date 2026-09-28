@@ -337,6 +337,11 @@ pub fn clamp(
     if !["session", "user"].contains(&a.suggestion.requester.as_str()) {
         a.suggestion.requester = "session".into();
     }
+    // Sessions are per host: a multi-host approval bound to one session would never
+    // match anywhere else.
+    if a.suggestion.hosts != "host" {
+        a.suggestion.requester = "user".into();
+    }
     // A request the model rates high-risk should not be pre-filled as "approve".
     if a.risk >= 70 && a.suggestion.decision == "approve" {
         a.suggestion.decision = "ask".into();

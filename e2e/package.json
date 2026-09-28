@@ -1,0 +1,13 @@
+{
+  "name": "agent-sudo-e2e",
+  "private": true,
+  "type": "module",
+  "license": "Apache-2.0 OR MIT",
+  "scripts": {
+    "test": "playwright test",
+    "icons": "node scripts/render-icons.mjs"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.55.0"
+  }
+}

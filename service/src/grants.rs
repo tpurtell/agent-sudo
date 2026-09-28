@@ -86,13 +86,16 @@ fn default_relevance() -> f32 {
 
 impl Default for DelegationLimits {
     fn default() -> Self {
+        // Chat models report these as rough likelihoods, not calibrated probabilities.
+        // They are backstops; relevance, overall risk, and the deterministic forbidden
+        // features do most of the gating. Tuned against DeepSeek V4 Flash.
         let mut dims = BTreeMap::new();
         for (k, v) in [
-            ("destructive", 0.25),
-            ("privilege_escape", 0.2),
-            ("persistence", 0.5),
-            ("credential_access", 0.15),
-            ("network_security", 0.5),
+            ("destructive", 0.4),
+            ("privilege_escape", 0.4),
+            ("persistence", 0.9),
+            ("credential_access", 0.3),
+            ("network_security", 0.6),
         ] {
             dims.insert(k.to_string(), v);
         }

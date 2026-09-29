@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+## 0.2.1 (2026-09-29)
+
+A service release. Homebrew hosts keep the 0.2.0 bottles; the two installer fixes
+reach hosts installed with `curl …/install.sh` now and Homebrew hosts with the next
+bottles.
 
 - Enrolling failed when the one-time token happened to start with `-` (about one
   in 64): the installer passed it so it read as an option. The installer now passes

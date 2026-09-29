@@ -45,7 +45,7 @@ dependencies = [
 
 [[package]]
 name = "agent-sudo-hostd"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "agent-sudo-protocol",
  "anyhow",
@@ -65,7 +65,7 @@ dependencies = [
 
 [[package]]
 name = "agent-sudo-protocol"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "base64 0.22.1",
  "ed25519-dalek",
@@ -79,7 +79,7 @@ dependencies = [
 
 [[package]]
 name = "agent-sudo-service"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "aes-gcm",
  "agent-sudo-protocol",

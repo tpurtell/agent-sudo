@@ -18,7 +18,7 @@ import { type DecisionBody, needsStepUp, submitDecision } from "../decide";
 import { basename, combineIntents, delegationLength, h, icon, minutesLabel, snapDelegation, timeAgo, clock, DELEGATION_DURATIONS } from "../dom";
 import { type Mounted, navigate } from "../router";
 import type { RequestView } from "../types";
-import { action, busy, confirmSheet, emptyState, field, segmented, toast, type Option } from "../ui";
+import { action, busy, confirmSheet, emptyState, field, keepState, segmented, toast, type Option } from "../ui";
 
 const TTL_CHOICES = [10, 30, 60, 240, 480];
 
@@ -46,7 +46,7 @@ export async function requestPage(params: Record<string, string>): Promise<Mount
   const render = () => {
     // Until the approver changes something, follow the latest suggestion.
     const keep = draft?.touched ? draft : null;
-    el.replaceChildren(...build(r, keep, (d) => (draft = d), reload));
+    keepState(el, () => el.replaceChildren(...build(r, keep, (d) => (draft = d), reload)));
   };
   const reload = async () => {
     r = await api<RequestView>("GET", `/api/requests/${params.id}`);
@@ -215,7 +215,7 @@ function build(r: RequestView, keep: Draft | null, save: (d: Draft) => void, rel
   );
 
   const chain = r.session.chain?.length
-    ? h("details", { class: "more" }, h("summary", {}, icon("chevron"), "Process ancestry"), h("div", { class: "chain", style: "margin-top:8px" }, ...r.session.chain.map((p) => h("div", { title: p.cmdline }, h("b", {}, p.name), ` ${p.pid} · ${p.cmdline}`))))
+    ? h("details", { class: "more", dataset: { key: "ancestry" } }, h("summary", {}, icon("chevron"), "Process ancestry"), h("div", { class: "chain", style: "margin-top:8px" }, ...r.session.chain.map((p) => h("div", { title: p.cmdline }, h("b", {}, p.name), ` ${p.pid} · ${p.cmdline}`))))
     : null;
 
   const main = h(
@@ -289,7 +289,7 @@ function analysisCard(r: RequestView, reload: () => Promise<void>): HTMLElement 
           ? "Deny"
           : "Look closely before deciding";
     body.append(h("div", { class: "row small", style: "align-items:flex-start" }, h("span", { class: "chip auto" }, icon("sparkle"), "Suggested"), h("span", {}, sugText)));
-    body.append(h("details", { class: "more" }, h("summary", {}, icon("chevron"), "Risk dimensions"), h("div", { style: "margin-top:10px" }, dimensions(a))));
+    body.append(h("details", { class: "more", dataset: { key: "dimensions" } }, h("summary", {}, icon("chevron"), "Risk dimensions"), h("div", { style: "margin-top:10px" }, dimensions(a))));
     if (a.clamped.length) {
       body.append(h("div", { class: "tip warn" }, icon("shield"), h("div", { class: "small" }, h("b", {}, "Policy adjusted the model's answer. "), a.clamped.join(". "), ".")));
     }
@@ -479,7 +479,7 @@ function decisionBuilder(r: RequestView, d: Draft, save: (d: Draft) => void, rel
   function ruleDetail(): HTMLElement[] {
     const kind = d.row === "kind";
     const intentValue = kind ? d.intent : d.anyIntent;
-    const intent = h("textarea", { class: "input", rows: "2", maxlength: "600", placeholder: kind ? `${program}: what kind of work` : "e.g. Benchmarking the new inference build" }, intentValue) as HTMLTextAreaElement;
+    const intent = h("textarea", { class: "input", rows: "2", maxlength: "600", dataset: { key: kind ? "intent" : "any-intent" }, placeholder: kind ? `${program}: what kind of work` : "e.g. Benchmarking the new inference build" }, intentValue) as HTMLTextAreaElement;
     intent.addEventListener("input", () => update(kind ? { intent: intent.value } : { anyIntent: intent.value }));
     const source =
       !kind
@@ -516,7 +516,7 @@ function decisionBuilder(r: RequestView, d: Draft, save: (d: Draft) => void, rel
     });
     const adjust = h(
       "details",
-      { class: "more" },
+      { class: "more", dataset: { key: "adjust" } },
       h("summary", {}, icon("chevron"), "Adjust scope"),
       h(
         "div",
@@ -583,7 +583,7 @@ function decisionBuilder(r: RequestView, d: Draft, save: (d: Draft) => void, rel
       d.row === "prefix-grant" && r.argv.length > 1 ? prefixPicker(r, d.prefixLen, (n) => update({ prefixLen: n }, true)) : null,
       h(
         "details",
-        { class: "more" },
+        { class: "more", dataset: { key: "adjust" } },
         h("summary", {}, icon("chevron"), "Adjust scope"),
         h(
           "div",
@@ -641,7 +641,7 @@ function decisionBuilder(r: RequestView, d: Draft, save: (d: Draft) => void, rel
   };
 
   function paint() {
-    detail.replaceChildren(...(d.row === "kind" || d.row === "any" ? ruleDetail() : d.row === "once" ? [] : grantDetail()));
+    keepState(detail, () => detail.replaceChildren(...(d.row === "kind" || d.row === "any" ? ruleDetail() : d.row === "once" ? [] : grantDetail())));
     sync();
   }
 
@@ -694,13 +694,13 @@ function prefixPicker(r: RequestView, n: number, set: (n: number) => void): HTML
 function advancedOptions(r: RequestView, d: Draft, update: (p: Partial<Draft>) => void): HTMLElement {
   const refresh = h("input", { type: "checkbox", checked: d.refresh, disabled: r.mode === "validate" }) as HTMLInputElement;
   refresh.addEventListener("change", () => update({ refresh: refresh.checked }));
-  const note = h("input", { class: "input", placeholder: "Optional note shown in the terminal", value: d.note, maxlength: "200" }) as HTMLInputElement;
+  const note = h("input", { class: "input", dataset: { key: "note" }, placeholder: "Optional note shown in the terminal", value: d.note, maxlength: "200" }) as HTMLInputElement;
   note.addEventListener("input", () => update({ note: note.value }));
   const hard = h("input", { type: "checkbox", checked: d.hard, disabled: r.class.hard_deny }) as HTMLInputElement;
   hard.addEventListener("change", () => update({ hard: hard.checked }));
   return h(
     "details",
-    { class: "more" },
+    { class: "more", dataset: { key: "more-options" } },
     h("summary", {}, icon("chevron"), "More options"),
     h(
       "div",

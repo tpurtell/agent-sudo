@@ -54,7 +54,7 @@ function grantRow(g: GrantView, reload: () => void): HTMLElement {
   return h(
     "div",
     { class: ["grant", g.kind, ended && "ended"] },
-    h("div", { class: "row between top" }, h("div", { style: "min-width:0" }, g.kind === "delegation" ? h("div", { class: "intent" }, `“${g.label}”`) : h("div", { class: "tl-cmd" }, g.label), h("div", { class: "tiny faint", style: "margin-top:3px" }, g.summary)), status),
+    h("a", { class: "row between top grant-link", href: `/rules/${g.id}` }, h("div", { style: "min-width:0" }, g.kind === "delegation" ? h("div", { class: "intent" }, `“${g.label}”`) : h("div", { class: "tl-cmd" }, g.label), h("div", { class: "tiny faint", style: "margin-top:3px" }, g.summary)), h("span", { class: "row", style: "gap:6px" }, status, icon("chevron", "faint"))),
     ended ? null : h("div", { class: "ttl" }, h("i", { style: `width:${rem.pct}%` })),
     h(
       "div",
@@ -63,7 +63,7 @@ function grantRow(g: GrantView, reload: () => void): HTMLElement {
       actions,
     ),
     g.pause_reason ? h("div", { class: "small", style: "color:var(--warn)" }, g.pause_reason) : null,
-    g.created_from_request ? h("a", { class: "tiny faint", href: `/r/${g.created_from_request}` }, "Created from a request →") : null,
+    h("div", { class: "row wrap", style: "gap:14px" }, h("a", { class: "tiny", href: `/rules/${g.id}` }, g.kind === "delegation" ? "Details and edit →" : "Details →"), g.created_from_request ? h("a", { class: "tiny faint", href: `/r/${g.created_from_request}` }, "Created from a request →") : null),
   );
 }
 

@@ -2346,6 +2346,313 @@ pub fn create_delegation(
     Ok((d.id, d.spec))
 }
 
+/// Everything the rule page shows about a grant or delegation: its scope spelled
+/// out, the requests it decided, and its history.
+pub fn rule_view(state: &AppState, g: &GrantRow) -> anyhow::Result<Value> {
+    let now = now_ms();
+    let mut v = json!(g);
+    v["active"] = json!(g.active(now));
+    v["summary"] = json!(grant_summary_with(state, g, false));
+    let host_names = |scope: &HostScope| match scope {
+        HostScope::Host { host_id } => {
+            json!({"scope": "host", "hosts": [host_name(state, host_id)], "host_id": host_id})
+        }
+        HostScope::Groups { groups } => json!({"scope": "groups", "groups": groups}),
+        HostScope::All => json!({"scope": "all"}),
+    };
+    let requester = |r: Option<&RequesterScope>| match r {
+        Some(RequesterScope::Session { label, .. }) => json!({"scope": "session", "label": label}),
+        Some(RequesterScope::User { user }) => json!({"scope": "user", "user": user}),
+        None => json!({"scope": "any"}),
+    };
+    let commands = |cs: &[CommandScope]| -> Vec<Value> {
+        cs.iter()
+            .map(|c| json!({"text": grants::describe_commands(std::slice::from_ref(c)), "match": c.kind, "executable": c.executable, "argv": c.argv}))
+            .collect()
+    };
+    if g.kind == "delegation" {
+        if let Ok(spec) = serde_json::from_value::<DelegationSpec>(g.spec.clone()) {
+            let per_day = spec
+                .per_day
+                .unwrap_or(state.cfg.policy.automation.max_decisions_per_day);
+            let approved_24h: i64 = state.db.lock().query_row(
+                "SELECT COUNT(*) FROM requests WHERE delegation_id = ?1 AND state = 'approved'
+                   AND decided_at > ?2 AND json_extract(decision_json, '$.decision.via') = 'delegation'",
+                params![g.id, now - 86_400_000],
+                |r| r.get(0),
+            )?;
+            v["scope"] = json!({
+                "intent": spec.intent,
+                "intent_source": spec.intent_source,
+                "commands": commands(&spec.commands),
+                "hosts": host_names(&spec.hosts),
+                "requester": requester(spec.requester.as_ref()),
+                "target_uids": spec.target_uids,
+                "max_risk": spec.limits.max_risk,
+                "default_max_risk": state.cfg.policy.automation.default_limits.max_risk,
+                "notify": spec.notify,
+                "per_day": per_day,
+                "approved_24h": approved_24h,
+            });
+        }
+    } else if let Ok(spec) = serde_json::from_value::<GrantSpec>(g.spec.clone()) {
+        v["scope"] = json!({
+            "commands": commands(std::slice::from_ref(&spec.command)),
+            "hosts": host_names(&spec.hosts),
+            "requester": requester(Some(&spec.requester)),
+            "target_uids": [spec.target_uid],
+        });
+    }
+    let decided: Vec<Value> = {
+        let db = state.db.lock();
+        let mut stmt = db.prepare(
+            "SELECT * FROM requests WHERE (grant_id = ?1 OR delegation_id = ?1) AND id IS NOT ?2
+             ORDER BY created_at DESC LIMIT 50",
+        )?;
+        let rows = stmt
+            .query_map(params![g.id, g.created_from_request], row_request)?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(stmt);
+        drop(db);
+        rows.iter()
+            .map(|r| {
+                json!({
+                    "id": r.id,
+                    "code": r.code,
+                    "display": policy::display_command(&r.envelope),
+                    "host": host_name(state, &r.host_id),
+                    "state": r.state.as_str(),
+                    "via": r.decision.as_ref().map(|d| d.decision.via),
+                    "created_at": r.created_at,
+                    "flagged": r.flagged_at.is_some(),
+                })
+            })
+            .collect()
+    };
+    let history: Vec<Value> = {
+        let db = state.db.lock();
+        let mut stmt = db.prepare(
+            "SELECT at, actor, kind, detail_json FROM audit WHERE subject = ?1
+               AND kind NOT IN ('delegation.approved', 'delegation.declined')
+             ORDER BY seq DESC LIMIT 50",
+        )?;
+        stmt.query_map([&g.id], |r| {
+            Ok(json!({
+                "at": r.get::<_, i64>(0)?,
+                "actor": r.get::<_, String>(1)?,
+                "kind": r.get::<_, String>(2)?,
+                "detail": serde_json::from_str::<Value>(&r.get::<_, String>(3)?).unwrap_or(Value::Null),
+            }))
+        })?
+        .collect::<Result<Vec<_>, _>>()?
+    };
+    v["requests"] = json!(decided);
+    v["history"] = json!(history);
+    Ok(v)
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DelegationEdit {
+    /// The `updated_at` the editor saw: the rule's last change, so an edit can't
+    /// silently overwrite a widening made meanwhile.
+    pub seen: i64,
+    #[serde(default)]
+    pub intent: Option<String>,
+    /// host | group | all; host keeps the rule's current host.
+    #[serde(default)]
+    pub hosts: Option<String>,
+    #[serde(default)]
+    pub groups: Vec<String>,
+    /// Indexes into the rule's current command filters to keep.
+    #[serde(default)]
+    pub keep_commands: Option<Vec<usize>>,
+    /// Minutes from now; 0 means no expiry.
+    #[serde(default)]
+    pub ttl_minutes: Option<u32>,
+    #[serde(default)]
+    pub max_risk: Option<u8>,
+    #[serde(default)]
+    pub notify: Option<NotifyMode>,
+    #[serde(default)]
+    pub per_day: Option<u32>,
+}
+
+/// The newest change to a rule: when it was created or last widened, edited, paused
+/// or resumed.
+pub fn rule_updated_at(state: &AppState, g: &GrantRow) -> i64 {
+    state
+        .db
+        .lock()
+        .query_row(
+            "SELECT MAX(at) FROM audit WHERE subject = ?1 AND kind IN
+               ('delegation.widened', 'delegation.edited', 'delegation.paused', 'delegation.resumed', 'grant.revoked')",
+            [&g.id],
+            |r| r.get::<_, Option<i64>>(0),
+        )
+        .ok()
+        .flatten()
+        .unwrap_or(g.created_at)
+        .max(g.created_at)
+}
+
+/// Edit a delegation in place. Narrowing is free; anything that makes it broader than
+/// a passkey-free rule needs a passkey, as creating it that way would.
+pub fn edit_delegation(
+    state: &Shared,
+    session: &Session,
+    id: &str,
+    edit: &DelegationEdit,
+) -> ApiResult<()> {
+    if !session.user.can_decide() {
+        return Err(ApiError::forbidden("Not allowed."));
+    }
+    let g = grant(state, id)?
+        .filter(|g| g.kind == "delegation")
+        .ok_or_else(|| ApiError::not_found("No such delegation."))?;
+    if g.revoked_at.is_some() {
+        return Err(ApiError::conflict("This delegation was stopped."));
+    }
+    if rule_updated_at(state, &g) != edit.seen {
+        return Err(ApiError::conflict(
+            "This delegation changed while you were editing it. Reload and try again.",
+        ));
+    }
+    let before: DelegationSpec = serde_json::from_value(g.spec.clone())
+        .map_err(|_| ApiError::bad_request("This delegation can't be edited."))?;
+    let mut after = before.clone();
+    if let Some(intent) = &edit.intent {
+        let intent = intent.trim();
+        if intent.chars().count() < 8 {
+            return Err(ApiError::bad_request(
+                "Describe the kind of work in a few words; the model judges requests against it.",
+            ));
+        }
+        if intent != before.intent {
+            after.intent = intent.chars().take(600).collect();
+            after.intent_source = grants::IntentSource::Approver;
+        }
+    }
+    if let Some(keep) = &edit.keep_commands
+        && !before.commands.is_empty()
+    {
+        let kept: Vec<CommandScope> = keep
+            .iter()
+            .filter_map(|&i| before.commands.get(i).cloned())
+            .collect();
+        if kept.is_empty() {
+            return Err(ApiError::bad_request(
+                "Keep at least one program, or stop the delegation instead.",
+            ));
+        }
+        after.commands = kept;
+    }
+    if let Some(hosts) = edit.hosts.as_deref() {
+        after.hosts = match hosts {
+            "host" => match &before.hosts {
+                HostScope::Host { .. } => before.hosts.clone(),
+                _ => return Err(ApiError::bad_request("Choose a group or all hosts.")),
+            },
+            "group" => {
+                let known: Vec<String> = hosts_all_groups(state)?;
+                let groups: Vec<String> = edit
+                    .groups
+                    .iter()
+                    .filter(|g| known.contains(g))
+                    .cloned()
+                    .collect();
+                if groups.is_empty() {
+                    return Err(ApiError::bad_request("Choose at least one group."));
+                }
+                HostScope::Groups { groups }
+            }
+            "all" => HostScope::All,
+            _ => return Err(ApiError::bad_request("Unknown host scope.")),
+        };
+    }
+    if let Some(r) = edit.max_risk {
+        after.limits.max_risk = r.clamp(5, 60);
+    }
+    if let Some(n) = edit.notify {
+        after.notify = n;
+    }
+    if let Some(p) = edit.per_day {
+        after.per_day = Some(p.min(1000));
+    }
+    let now = now_ms();
+    let expires_at = match edit.ttl_minutes {
+        None => g.expires_at,
+        Some(t) => match delegation_ttl(state, t) {
+            0 => None,
+            t => Some(now + t as i64 * 60_000),
+        },
+    };
+
+    let default_risk = state.cfg.policy.automation.default_limits.max_risk;
+    let broader_hosts = host_breadth(&after.hosts) > host_breadth(&before.hosts)
+        || matches!((&before.hosts, &after.hosts), (HostScope::Groups { groups: a }, HostScope::Groups { groups: b }) if b.iter().any(|g| !a.contains(g)));
+    let longer = match (g.expires_at, expires_at) {
+        (Some(_), None) => true,
+        (Some(old), Some(new)) => new > old && new > now + 86_400_000,
+        _ => false,
+    };
+    // 0 means no daily limit, the most there is.
+    let budget = |s: &DelegationSpec| match s
+        .per_day
+        .unwrap_or(state.cfg.policy.automation.max_decisions_per_day)
+    {
+        0 => u32::MAX,
+        n => n,
+    };
+    let needs_passkey = broader_hosts
+        || longer
+        || (after.limits.max_risk > before.limits.max_risk && after.limits.max_risk > default_risk)
+        || budget(&after) > budget(&before);
+    if needs_passkey {
+        crate::auth::require_strong(state, session, Some(state.cfg.sessions.strong_auth_minutes))?;
+    }
+    if after == before && expires_at == g.expires_at {
+        return Ok(());
+    }
+    let label = delegation_label(&after.intent);
+    let changed = state.db.lock().execute(
+        "UPDATE grants SET spec_json = ?1, label = ?2, expires_at = ?3
+         WHERE id = ?4 AND kind = 'delegation' AND revoked_at IS NULL",
+        params![
+            serde_json::to_string(&after).map_err(anyhow::Error::from)?,
+            label,
+            expires_at,
+            g.id
+        ],
+    )?;
+    if changed == 0 {
+        return Err(ApiError::conflict("This delegation was stopped."));
+    }
+    audit::record(
+        &state.db,
+        &session.user.name,
+        "delegation.edited",
+        Some(&g.id),
+        json!({"before": before, "after": after, "expires_before": g.expires_at, "expires_at": expires_at,
+               "device": session.device_label}),
+    );
+    state.emit(Event::Grants);
+    let s = state.clone();
+    let changed = g.id.clone();
+    tokio::spawn(async move { recheck_pending(&s, &changed).await });
+    Ok(())
+}
+
+fn hosts_all_groups(state: &AppState) -> anyhow::Result<Vec<String>> {
+    let mut groups: Vec<String> = hosts(state)?
+        .into_iter()
+        .filter(|h| h.revoked_at.is_none())
+        .flat_map(|h| h.groups)
+        .collect();
+    groups.sort();
+    groups.dedup();
+    Ok(groups)
+}
+
 /// A human marks an automated approval as a mistake: pause the delegation.
 pub fn flag(state: &AppState, session: &Session, id: &str) -> ApiResult<()> {
     let row = request(state, id)?.ok_or_else(|| ApiError::not_found("No such request."))?;

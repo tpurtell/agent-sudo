@@ -157,6 +157,26 @@ export interface GrantView {
   summary: string;
 }
 
+/** A grant or delegation with its scope spelled out, from `/api/grants/:id`. */
+export interface RuleView extends GrantView {
+  updated_at: number;
+  scope?: {
+    intent?: string;
+    intent_source?: "approver" | "model" | "template";
+    commands: { text: string; match: string; executable: string | null; argv: string[] }[];
+    hosts: { scope: "host" | "groups" | "all"; hosts?: string[]; host_id?: string; groups?: string[] };
+    requester: { scope: "session" | "user" | "any"; label?: string; user?: string };
+    target_uids: number[];
+    max_risk?: number;
+    default_max_risk?: number;
+    notify?: "each" | "digest" | "silent";
+    per_day?: number;
+    approved_24h?: number;
+  };
+  requests: { id: string; code: string; display: string; host: string; state: string; via: string | null; created_at: number; flagged: boolean }[];
+  history: { at: number; actor: string; kind: string; detail: any }[];
+}
+
 export interface HostView {
   id: string;
   name: string;

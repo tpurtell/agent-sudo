@@ -11,6 +11,7 @@ import { pendingPage } from "./pages/pending";
 import { requestPage } from "./pages/request";
 import { activityPage } from "./pages/activity";
 import { authorityPage } from "./pages/authority";
+import { rulePage } from "./pages/rule";
 import { hostsPage } from "./pages/hosts";
 import { auditPage, settingsPage } from "./pages/settings";
 
@@ -18,6 +19,7 @@ route("/", pendingPage);
 route("/r/:id", requestPage);
 route("/activity", activityPage);
 route("/authority", authorityPage);
+route("/rules/:id", rulePage);
 route("/hosts", hostsPage);
 route("/settings", settingsPage);
 route("/audit", auditPage);

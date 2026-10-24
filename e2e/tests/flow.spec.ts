@@ -129,7 +129,14 @@ test("grants are scoped: session grants don't leak, user grants are reused", asy
   await openRequest(id);
   await page.getByRole("radio", { name: /Exactly this command/ }).click();
   await page.getByText("Adjust scope").click();
+  // Changing an option keeps the section open and the page where it was.
   await page.getByRole("radio", { name: /This session/ }).click();
+  await expect(page.locator("details.more", { hasText: "Adjust scope" })).toHaveAttribute("open", "");
+  const y = await page.evaluate(() => scrollY);
+  await page.getByRole("radio", { name: /Any session/ }).click();
+  await page.getByRole("radio", { name: /This session/ }).click();
+  await expect(page.getByRole("radio", { name: /This session/ })).toHaveAttribute("aria-checked", "true");
+  expect(Math.abs((await page.evaluate(() => scrollY)) - y)).toBeLessThan(40);
   await page.locator(".decision-bar").getByRole("button", { name: /Approve for/ }).click();
   expect((await first.finish()).exit).toBe(0);
 
@@ -377,6 +384,34 @@ test("delegations let the model approve related work, within limits", async () =
   expect(widened).toHaveLength(1);
   const nginx = await (await run(["agent-sudo", "echo", "install", "nginx-common"])).finish(20_000);
   expect(nginx.output).toContain("approved by delegation");
+
+  // The rule has its own page: what it covers, what it approved, and an editor.
+  await page.goto("/authority");
+  await page.locator(".grant", { hasText: "installing driver packages" }).getByRole("link", { name: "Details and edit →" }).click();
+  await expect(page.getByRole("heading", { name: "Delegation" })).toBeVisible();
+  await expect(page.getByText("echo (any arguments)")).toBeVisible();
+  await expect(page.locator(".tl-item", { hasText: "nvidia-dkms" })).toBeVisible();
+  await expect(page.locator(".tl-item", { hasText: "Widened from a request" })).toBeVisible();
+  await page.getByRole("button", { name: "Edit" }).click();
+  await page.getByRole("dialog").getByLabel("Most approvals a day").fill("40");
+  await page.getByRole("dialog").getByRole("button", { name: "Save changes" }).click();
+  await expect(page.getByText("Delegation updated")).toBeVisible();
+  await expect(page.getByText(/of 40 in the last 24 hours/)).toBeVisible();
+  await expect(page.locator(".tl-item", { hasText: "Edited" })).toContainText("40 daily limit");
+  // It fits a small phone, editor included.
+  await page.setViewportSize({ width: 360, height: 780 });
+  await page.waitForTimeout(200);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(360);
+  if (process.env.SHOTS) await page.screenshot({ path: "test-results/shots/rule.png", fullPage: true });
+  await page.getByRole("button", { name: "Edit" }).click();
+  await expect(page.getByRole("dialog").getByRole("button", { name: "Save changes" })).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(360);
+  if (process.env.SHOTS) {
+    await page.waitForTimeout(400);
+    await page.screenshot({ path: "test-results/shots/rule-edit.png" });
+  }
+  await page.keyboard.press("Escape");
+  await page.setViewportSize({ width: 1280, height: 720 });
 
   // The kill switch stops automation immediately.
   await page.goto("/authority");

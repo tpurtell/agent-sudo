@@ -42,5 +42,6 @@ services:
       BASE_URL: https://sudo.e2e.test
       HOST_RUNNER: http://host:9000
       CI: "1"
+      SHOTS: ${SHOTS:-}
     depends_on: [proxy, host, mock-llm]
     command: ["sleep", "infinity"]

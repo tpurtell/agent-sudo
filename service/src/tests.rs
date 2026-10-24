@@ -1487,3 +1487,106 @@ async fn declining_its_own_batch_does_not_pause_a_new_rule() {
     let rules = h.delegations().await;
     assert!(rules[0]["paused_at"].is_null(), "{}", rules[0]);
 }
+
+impl Harness {
+    async fn make_gpu_rule(&self) -> (String, Value) {
+        let (_, first) = self.submit(GPU, &["300"], |_| {}).await;
+        let (status, d) = self
+            .decide(
+                first["id"].as_str().unwrap(),
+                json!({"version": 1, "decision": "approve", "delegate": {
+                "intent": "set-gpu-power: adjusting GPU power limits", "ttl_minutes": 1440,
+                "hosts": "host", "requester": "user", "filter": "program"}}),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{d}");
+        let id = self.delegations().await[0]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let (_, rule) = self
+            .web("GET", &format!("/api/grants/{id}"), Value::Null)
+            .await;
+        (id, rule)
+    }
+}
+
+#[tokio::test]
+async fn a_rule_page_shows_its_scope_and_what_it_decided() {
+    let (h, _fit, _calls) = v2_harness("").await;
+    let (id, _) = h.make_gpu_rule().await;
+    let (_, auto) = h.submit(GPU, &[], |_| {}).await;
+    assert_eq!(auto["state"], "approved");
+    let (status, rule) = h
+        .web("GET", &format!("/api/grants/{id}"), Value::Null)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{rule}");
+    assert_eq!(
+        rule["scope"]["intent"],
+        "set-gpu-power: adjusting GPU power limits"
+    );
+    assert_eq!(
+        rule["scope"]["commands"][0]["text"],
+        "set-gpu-power (any arguments)"
+    );
+    assert_eq!(rule["scope"]["hosts"]["hosts"], json!(["moa"]));
+    assert_eq!(rule["scope"]["approved_24h"], 1);
+    // The origin request isn't listed again; the automatic approval is.
+    let reqs = rule["requests"].as_array().unwrap();
+    assert_eq!(reqs.len(), 1, "{rule}");
+    assert_eq!(reqs[0]["id"], auto["id"]);
+    assert_eq!(rule["history"][0]["kind"], "delegation.created");
+}
+
+#[tokio::test]
+async fn narrowing_a_delegation_needs_no_passkey_but_broadening_does() {
+    let (h, _fit, _calls) = v2_harness("").await;
+    let (id, rule) = h.make_gpu_rule().await;
+    h.weaken_session();
+    let path = format!("/api/delegations/{id}");
+    let (status, edited) = h
+        .web("PATCH", &path, json!({"seen": rule["updated_at"], "intent": "set-gpu-power: lowering GPU power limits", "max_risk": 20, "notify": "digest", "ttl_minutes": 60}))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{edited}");
+    assert_eq!(
+        edited["scope"]["intent"],
+        "set-gpu-power: lowering GPU power limits"
+    );
+    assert_eq!(edited["scope"]["intent_source"], "approver");
+    assert_eq!(edited["scope"]["max_risk"], 20);
+    assert_eq!(edited["scope"]["notify"], "digest");
+    assert_eq!(edited["label"], "set-gpu-power: lowering GPU power limits");
+    assert_eq!(edited["history"][0]["kind"], "delegation.edited");
+
+    // Broader: all hosts, forever, or a higher risk ceiling ask for a passkey.
+    for body in [
+        json!({"hosts": "all"}),
+        json!({"ttl_minutes": 0}),
+        json!({"max_risk": 50}),
+        json!({"per_day": 0}),
+        json!({"per_day": 80}),
+    ] {
+        let mut body = body;
+        body["seen"] = edited["updated_at"].clone();
+        let (status, err) = h.web("PATCH", &path, body.clone()).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body} {err}");
+    }
+    // An edit made against an older copy is refused.
+    let (status, _) = h
+        .web(
+            "PATCH",
+            &path,
+            json!({"seen": rule["updated_at"], "max_risk": 15}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    // Can't drop every program from a filtered rule.
+    let (status, _) = h
+        .web(
+            "PATCH",
+            &path,
+            json!({"seen": edited["updated_at"], "keep_commands": []}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}

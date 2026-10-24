@@ -59,6 +59,8 @@ pub fn router() -> Router<Shared> {
         .route("/api/requests/{id}/assess", post(request_assess))
         .route("/api/requests/{id}/flag", post(request_flag))
         .route("/api/grants", get(grants_list))
+        .route("/api/grants/{id}", get(grant_get))
+        .route("/api/delegations/{id}", patch(delegation_edit))
         .route("/api/grants/{id}/revoke", post(grant_revoke))
         .route("/api/grants/{id}/pause", post(grant_pause))
         .route("/api/grants/{id}/resume", post(grant_resume))
@@ -728,6 +730,30 @@ async fn grants_list(State(state): State<Shared>, Authed(_s): Authed) -> ApiResu
     Ok(Json(
         json!({"items": items, "automation": {"enabled": state.automation_enabled(), "configured": state.cfg.policy.automation.enabled}}),
     ))
+}
+
+async fn grant_get(
+    State(state): State<Shared>,
+    Authed(_s): Authed,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    let g = engine::grant(&state, &id)?.ok_or_else(|| ApiError::not_found("No such rule."))?;
+    let mut v = engine::rule_view(&state, &g)?;
+    v["updated_at"] = json!(engine::rule_updated_at(&state, &g));
+    Ok(Json(v))
+}
+
+async fn delegation_edit(
+    State(state): State<Shared>,
+    Authed(s): Authed,
+    Path(id): Path<String>,
+    Json(input): Json<engine::DelegationEdit>,
+) -> ApiResult<Json<Value>> {
+    engine::edit_delegation(&state, &s, &id, &input)?;
+    let g = engine::grant(&state, &id)?.ok_or_else(|| ApiError::not_found("No such rule."))?;
+    let mut v = engine::rule_view(&state, &g)?;
+    v["updated_at"] = json!(engine::rule_updated_at(&state, &g));
+    Ok(Json(v))
 }
 
 async fn grant_revoke(

@@ -314,6 +314,8 @@ const KIND_LABEL: Record<string, string> = {
   "delegation.created": "Delegation created",
   "delegation.paused": "Delegation paused",
   "delegation.resumed": "Delegation resumed",
+  "delegation.widened": "Delegation widened",
+  "delegation.edited": "Delegation edited",
   "grant.created": "Grant created",
   "grant.revoked": "Revoked",
   "host.enrolled": "Host enrolled",
@@ -321,6 +323,13 @@ const KIND_LABEL: Record<string, string> = {
   "session.created": "Signed in",
   "login.failed": "Sign-in failed",
 };
+
+/** Where an audit entry's subject lives in the app, if anywhere. */
+function link(subject: string | null | undefined): string | undefined {
+  if (subject?.startsWith("req_")) return `/r/${subject}`;
+  if (subject?.startsWith("dlg_") || subject?.startsWith("grt_")) return `/rules/${subject}`;
+  return undefined;
+}
 
 export async function auditPage(): Promise<Mounted> {
   const s = currentSession();
@@ -341,8 +350,8 @@ export async function auditPage(): Promise<Mounted> {
       const bad = /denied|failed|revoked|flagged|paused/.test(a.kind);
       rows.push(
         h(
-          a.subject?.startsWith("req_") ? "a" : "div",
-          { class: "tl-item", href: a.subject?.startsWith("req_") ? `/r/${a.subject}` : undefined },
+          link(a.subject) ? "a" : "div",
+          { class: "tl-item", href: link(a.subject) },
           h("span", { class: ["tl-icon", bad ? "bad" : a.kind.startsWith("delegation") ? "auto" : "gray"] }, icon(bad ? "alert" : a.kind.startsWith("delegation") ? "sparkle" : "history")),
           h("div", { style: "min-width:0" }, h("div", {}, h("b", {}, KIND_LABEL[a.kind] ?? a.kind), h("span", { class: "faint" }, ` · ${a.actor}`)), summary ? h("div", { class: "tl-meta mono truncate" }, String(summary)) : null),
           h("span", { class: "tiny faint nowrap" }, clock(a.at)),

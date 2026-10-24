@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Each grant and delegation has its own page: what it covers, what it approved, its
+  daily budget, and its history. Delegations can be edited there; narrowing takes
+  effect at once, and broadening asks for a passkey as creating it would.
+- Changing an option under **Adjust scope** no longer closes the section and jumps
+  the page.
+
 ## 0.2.1 (2026-09-29)
 
 A service release. Homebrew hosts keep the 0.2.0 bottles; the two installer fixes

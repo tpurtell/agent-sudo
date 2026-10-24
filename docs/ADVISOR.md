@@ -128,6 +128,14 @@ requests with **Remember** releases the others. This also applies to plain grant
 Each released request's notification is replaced quietly. Declines from these
 re-checks don't count towards pausing the new rule.
 
+Each rule has its own page (Authority → a rule): what it covers, its daily budget,
+the requests it decided, and its history of creation, widening, edits and pauses. A
+delegation can be edited there: its description, which of its programs it keeps,
+hosts, expiry, risk ceiling, daily limit and notifications. Narrowing needs no
+passkey; broader hosts, a later expiry past a day, a higher risk ceiling above the
+default or a larger daily limit do. An edit made against an older copy of the rule
+is refused, and requests already waiting are re-checked against the result.
+
 Delegations pause themselves after `pause_after_declines` declines in a row (counted
 for the narrowest matching rule only), or when anyone flags one of their approvals.
 `max_decisions` (0 by default) optionally adds a lifetime limit.

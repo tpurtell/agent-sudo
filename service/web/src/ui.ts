@@ -156,6 +156,28 @@ export function confirmSheet(title: string, body: Child, confirmLabel: string, d
   });
 }
 
+/**
+ * Rebuild part of a page without losing what the viewer had open: disclosures and the
+ * focused field are matched by `data-key`, so a rebuilt section looks the same.
+ */
+export function keepState(root: Element, rebuild: () => void): void {
+  const open = new Set(
+    [...root.querySelectorAll<HTMLDetailsElement>("details[data-key]")].filter((d) => d.open).map((d) => d.dataset.key!),
+  );
+  const active = document.activeElement as HTMLInputElement | HTMLTextAreaElement | null;
+  const focusKey = active && root.contains(active) && active.dataset?.key ? active.dataset.key : null;
+  const selection = focusKey && "selectionStart" in active! ? [active!.selectionStart, active!.selectionEnd] : null;
+  rebuild();
+  root.querySelectorAll<HTMLDetailsElement>("details[data-key]").forEach((d) => {
+    if (open.has(d.dataset.key!)) d.open = true;
+  });
+  if (focusKey) {
+    const next = root.querySelector<HTMLInputElement | HTMLTextAreaElement>(`[data-key="${focusKey}"]`);
+    next?.focus({ preventScroll: true });
+    if (next && selection && selection[0] !== null) next.setSelectionRange(selection[0], selection[1]);
+  }
+}
+
 let fieldSeq = 0;
 
 /** A labelled form field. Labels are linked to their control for assistive tech. */

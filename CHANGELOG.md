@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.2.2 (2026-10-25)
+
+A service release; hosts stay on the 0.2.0 Homebrew bottles.
 
 - Each grant and delegation has its own page: what it covers, what it approved, its
   daily budget, and its history. Delegations can be edited there; narrowing takes
